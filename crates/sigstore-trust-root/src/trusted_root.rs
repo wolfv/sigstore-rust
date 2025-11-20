@@ -1,0 +1,439 @@
+//! Trusted root types and parsing
+
+use crate::{Error, Result};
+use base64::Engine;
+use chrono::{DateTime, Utc};
+use rustls_pki_types::CertificateDer;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+
+/// A trusted root bundle containing all trust anchors
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrustedRoot {
+    /// Media type of the trusted root
+    pub media_type: String,
+
+    /// Transparency logs (Rekor)
+    #[serde(default)]
+    pub tlogs: Vec<TransparencyLog>,
+
+    /// Certificate authorities (Fulcio)
+    #[serde(default)]
+    pub certificate_authorities: Vec<CertificateAuthority>,
+
+    /// Certificate Transparency logs
+    #[serde(default)]
+    pub ctlogs: Vec<CertificateTransparencyLog>,
+
+    /// Timestamp authorities (RFC 3161 TSAs)
+    #[serde(default)]
+    pub timestamp_authorities: Vec<TimestampAuthority>,
+}
+
+/// A transparency log entry (Rekor)
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransparencyLog {
+    /// Base URL of the transparency log
+    pub base_url: String,
+
+    /// Hash algorithm used
+    pub hash_algorithm: String,
+
+    /// Public key for verification
+    pub public_key: PublicKey,
+
+    /// Log ID
+    pub log_id: LogId,
+}
+
+/// A certificate authority entry (Fulcio)
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CertificateAuthority {
+    /// Subject information
+    #[serde(default)]
+    pub subject: Subject,
+
+    /// URI of the CA
+    pub uri: String,
+
+    /// Certificate chain
+    pub cert_chain: CertChain,
+
+    /// Validity period
+    #[serde(default)]
+    pub valid_for: Option<ValidityPeriod>,
+}
+
+/// A Certificate Transparency log entry
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CertificateTransparencyLog {
+    /// Base URL of the CT log
+    pub base_url: String,
+
+    /// Hash algorithm used
+    pub hash_algorithm: String,
+
+    /// Public key for verification
+    pub public_key: PublicKey,
+
+    /// Log ID
+    pub log_id: LogId,
+}
+
+/// A timestamp authority entry
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimestampAuthority {
+    /// Subject information
+    #[serde(default)]
+    pub subject: Subject,
+
+    /// URI of the TSA
+    pub uri: String,
+
+    /// Certificate chain
+    pub cert_chain: CertChain,
+
+    /// Validity period
+    #[serde(default)]
+    pub valid_for: Option<ValidityPeriod>,
+}
+
+/// Public key information
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicKey {
+    /// Raw bytes of the public key (base64 encoded)
+    pub raw_bytes: String,
+
+    /// Key details/type
+    pub key_details: String,
+
+    /// Validity period for this key
+    #[serde(default)]
+    pub valid_for: Option<ValidityPeriod>,
+}
+
+/// Log identifier
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogId {
+    /// Key ID (base64 encoded)
+    pub key_id: String,
+}
+
+/// Subject information for a certificate
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Subject {
+    /// Organization name
+    #[serde(default)]
+    pub organization: Option<String>,
+
+    /// Common name
+    #[serde(default)]
+    pub common_name: Option<String>,
+}
+
+/// Certificate chain
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CertChain {
+    /// Certificates in the chain
+    pub certificates: Vec<CertificateEntry>,
+}
+
+/// A certificate entry
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CertificateEntry {
+    /// Raw bytes of the certificate (base64 encoded DER)
+    pub raw_bytes: String,
+}
+
+/// Validity period for a key or certificate
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidityPeriod {
+    /// Start time (ISO 8601)
+    #[serde(default)]
+    pub start: Option<String>,
+
+    /// End time (ISO 8601)
+    #[serde(default)]
+    pub end: Option<String>,
+}
+
+impl TrustedRoot {
+    /// Parse a trusted root from JSON
+    pub fn from_json(json: &str) -> Result<Self> {
+        Ok(serde_json::from_str(json)?)
+    }
+
+    /// Load a trusted root from a file
+    pub fn from_file(path: impl AsRef<std::path::Path>) -> Result<Self> {
+        let json =
+            std::fs::read_to_string(path).map_err(|e| Error::Json(serde_json::Error::io(e)))?;
+        Self::from_json(&json)
+    }
+
+    /// Get all Fulcio certificate authority certificates
+    pub fn fulcio_certs(&self) -> Result<Vec<CertificateDer<'static>>> {
+        let mut certs = Vec::new();
+        for ca in &self.certificate_authorities {
+            for cert_entry in &ca.cert_chain.certificates {
+                let cert_der =
+                    base64::engine::general_purpose::STANDARD.decode(&cert_entry.raw_bytes)?;
+                certs.push(CertificateDer::from(cert_der));
+            }
+        }
+        Ok(certs)
+    }
+
+    /// Get all Rekor public keys mapped by key ID
+    pub fn rekor_keys(&self) -> Result<HashMap<String, Vec<u8>>> {
+        let mut keys = HashMap::new();
+        for tlog in &self.tlogs {
+            let key_bytes =
+                base64::engine::general_purpose::STANDARD.decode(&tlog.public_key.raw_bytes)?;
+            keys.insert(tlog.log_id.key_id.clone(), key_bytes);
+        }
+        Ok(keys)
+    }
+
+    /// Get all Rekor public keys with their key hints (4-byte identifiers)
+    ///
+    /// Returns a vector of (key_hint, public_key_der) tuples where key_hint is
+    /// the first 4 bytes of the keyId from the log_id field.
+    pub fn rekor_keys_with_hints(&self) -> Result<Vec<([u8; 4], Vec<u8>)>> {
+        let mut keys = Vec::new();
+        for tlog in &self.tlogs {
+            let key_bytes =
+                base64::engine::general_purpose::STANDARD.decode(&tlog.public_key.raw_bytes)?;
+
+            // Decode the key_id to get the key hint (first 4 bytes)
+            let key_id_bytes =
+                base64::engine::general_purpose::STANDARD.decode(&tlog.log_id.key_id)?;
+
+            if key_id_bytes.len() >= 4 {
+                let key_hint: [u8; 4] = [
+                    key_id_bytes[0],
+                    key_id_bytes[1],
+                    key_id_bytes[2],
+                    key_id_bytes[3],
+                ];
+                keys.push((key_hint, key_bytes));
+            }
+        }
+        Ok(keys)
+    }
+
+    /// Get a specific Rekor public key by log ID
+    pub fn rekor_key_for_log(&self, log_id: &str) -> Result<Vec<u8>> {
+        for tlog in &self.tlogs {
+            if tlog.log_id.key_id == log_id {
+                return Ok(
+                    base64::engine::general_purpose::STANDARD.decode(&tlog.public_key.raw_bytes)?
+                );
+            }
+        }
+        Err(Error::KeyNotFound(log_id.to_string()))
+    }
+
+    /// Get all Certificate Transparency log public keys mapped by key ID
+    pub fn ctfe_keys(&self) -> Result<HashMap<String, Vec<u8>>> {
+        let mut keys = HashMap::new();
+        for ctlog in &self.ctlogs {
+            let key_bytes =
+                base64::engine::general_purpose::STANDARD.decode(&ctlog.public_key.raw_bytes)?;
+            keys.insert(ctlog.log_id.key_id.clone(), key_bytes);
+        }
+        Ok(keys)
+    }
+
+    /// Get all TSA certificates with their validity periods
+    pub fn tsa_certs_with_validity(
+        &self,
+    ) -> Result<
+        Vec<(
+            CertificateDer<'static>,
+            Option<DateTime<Utc>>,
+            Option<DateTime<Utc>>,
+        )>,
+    > {
+        let mut result = Vec::new();
+
+        for tsa in &self.timestamp_authorities {
+            for cert_entry in &tsa.cert_chain.certificates {
+                let cert_der =
+                    base64::engine::general_purpose::STANDARD.decode(&cert_entry.raw_bytes)?;
+
+                // Parse validity period
+                let (start, end) = if let Some(valid_for) = &tsa.valid_for {
+                    let start = valid_for
+                        .start
+                        .as_ref()
+                        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                        .map(|dt| dt.with_timezone(&Utc));
+                    let end = valid_for
+                        .end
+                        .as_ref()
+                        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                        .map(|dt| dt.with_timezone(&Utc));
+                    (start, end)
+                } else {
+                    (None, None)
+                };
+
+                result.push((CertificateDer::from(cert_der), start, end));
+            }
+        }
+
+        Ok(result)
+    }
+
+    /// Get TSA root certificates (for chain validation)
+    pub fn tsa_root_certs(&self) -> Result<Vec<CertificateDer<'static>>> {
+        let mut roots = Vec::new();
+        for tsa in &self.timestamp_authorities {
+            // The last certificate in the chain is typically the root
+            if let Some(cert_entry) = tsa.cert_chain.certificates.last() {
+                let cert_der =
+                    base64::engine::general_purpose::STANDARD.decode(&cert_entry.raw_bytes)?;
+                roots.push(CertificateDer::from(cert_der));
+            }
+        }
+        Ok(roots)
+    }
+
+    /// Get TSA intermediate certificates (for chain validation)
+    pub fn tsa_intermediate_certs(&self) -> Result<Vec<CertificateDer<'static>>> {
+        let mut intermediates = Vec::new();
+        for tsa in &self.timestamp_authorities {
+            // All certificates except the first (leaf) and last (root) are intermediates
+            let chain_len = tsa.cert_chain.certificates.len();
+            if chain_len > 2 {
+                for cert_entry in &tsa.cert_chain.certificates[1..chain_len - 1] {
+                    let cert_der =
+                        base64::engine::general_purpose::STANDARD.decode(&cert_entry.raw_bytes)?;
+                    intermediates.push(CertificateDer::from(cert_der));
+                }
+            }
+        }
+        Ok(intermediates)
+    }
+
+    /// Get TSA leaf certificates (the first certificate in each chain)
+    /// These are the actual TSA signing certificates
+    pub fn tsa_leaf_certs(&self) -> Result<Vec<CertificateDer<'static>>> {
+        let mut leaves = Vec::new();
+        for tsa in &self.timestamp_authorities {
+            // The first certificate in the chain is the leaf (TSA signing cert)
+            if let Some(cert_entry) = tsa.cert_chain.certificates.first() {
+                let cert_der =
+                    base64::engine::general_purpose::STANDARD.decode(&cert_entry.raw_bytes)?;
+                leaves.push(CertificateDer::from(cert_der));
+            }
+        }
+        Ok(leaves)
+    }
+
+    /// Check if a Rekor key ID exists in the trusted root
+    pub fn has_rekor_key(&self, key_id: &str) -> bool {
+        self.tlogs.iter().any(|tlog| tlog.log_id.key_id == key_id)
+    }
+
+    /// Get the validity period for a TSA at a given time
+    pub fn tsa_validity_for_time(
+        &self,
+        timestamp: DateTime<Utc>,
+    ) -> Result<Option<(DateTime<Utc>, DateTime<Utc>)>> {
+        for tsa in &self.timestamp_authorities {
+            if let Some(valid_for) = &tsa.valid_for {
+                let start = valid_for
+                    .start
+                    .as_ref()
+                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| dt.with_timezone(&Utc));
+                let end = valid_for
+                    .end
+                    .as_ref()
+                    .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                    .map(|dt| dt.with_timezone(&Utc));
+
+                // Check if timestamp falls within this TSA's validity
+                if let (Some(start_time), Some(end_time)) = (start, end) {
+                    if timestamp >= start_time && timestamp <= end_time {
+                        return Ok(Some((start_time, end_time)));
+                    }
+                } else if let Some(start_time) = start {
+                    // Only start time specified, check if after start
+                    if timestamp >= start_time {
+                        return Ok(start.zip(end));
+                    }
+                }
+            }
+        }
+        Ok(None)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const SAMPLE_TRUSTED_ROOT: &str = r#"{
+        "mediaType": "application/vnd.dev.sigstore.trustedroot+json;version=0.1",
+        "tlogs": [{
+            "baseUrl": "https://rekor.sigstore.dev",
+            "hashAlgorithm": "SHA2_256",
+            "publicKey": {
+                "rawBytes": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEYI4heOTrNrZO27elFE8ynfrdPMikttRkbe+vJKQ50G6bfwQ3WyhLpRwwwohelDAm8xRzJ56nYsIa3VHivVvpmA==",
+                "keyDetails": "PKIX_ECDSA_P256_SHA_256"
+            },
+            "logId": {
+                "keyId": "test-key-id"
+            }
+        }],
+        "certificateAuthorities": [],
+        "ctlogs": [],
+        "timestampAuthorities": []
+    }"#;
+
+    #[test]
+    fn test_parse_trusted_root() {
+        let root = TrustedRoot::from_json(SAMPLE_TRUSTED_ROOT).unwrap();
+        assert_eq!(root.tlogs.len(), 1);
+        assert_eq!(root.tlogs[0].log_id.key_id, "test-key-id");
+    }
+
+    #[test]
+    fn test_rekor_keys() {
+        let root = TrustedRoot::from_json(SAMPLE_TRUSTED_ROOT).unwrap();
+        let keys = root.rekor_keys().unwrap();
+        assert_eq!(keys.len(), 1);
+        assert!(keys.contains_key("test-key-id"));
+    }
+
+    #[test]
+    fn test_has_rekor_key() {
+        let root = TrustedRoot::from_json(SAMPLE_TRUSTED_ROOT).unwrap();
+        assert!(root.has_rekor_key("test-key-id"));
+        assert!(!root.has_rekor_key("non-existent"));
+    }
+}
+
+/// Embedded production trusted root from https://tuf-repo-cdn.sigstore.dev/
+/// This is the default trusted root for Sigstore's public production instance.
+pub const SIGSTORE_PRODUCTION_TRUSTED_ROOT: &str = include_str!("trusted_root.json");
+
+impl TrustedRoot {
+    /// Load the default Sigstore production trusted root
+    pub fn production() -> Result<Self> {
+        Self::from_json(SIGSTORE_PRODUCTION_TRUSTED_ROOT)
+    }
+}

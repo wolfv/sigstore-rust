@@ -1,0 +1,195 @@
+use sha2::{Digest, Sha256};
+use sigstore::bundle::{BundleBuilder, TlogEntryBuilder};
+use sigstore::crypto::KeyPair;
+use sigstore::fulcio::FulcioClient;
+use sigstore::oidc::get_identity_token;
+use sigstore::rekor::{HashedRekord, RekorClient};
+use sigstore::types::MediaType;
+use std::env;
+use std::fs;
+use std::path::PathBuf;
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Parse arguments
+    let args: Vec<String> = env::args().collect();
+    if args.len() != 3 {
+        eprintln!("Usage: {} <file-to-sign> <output-bundle>", args[0]);
+        std::process::exit(1);
+    }
+    let file_path = PathBuf::from(&args[1]);
+    let bundle_path = PathBuf::from(&args[2]);
+
+    println!("Signing file: {:?}", file_path);
+    let artifact_data = fs::read(&file_path)?;
+
+    // 1. OIDC: Get Identity Token
+    println!("Getting OIDC identity token...");
+    // Use default issuer (sigstore.dev)
+    let token_response = get_identity_token(|response| {
+        println!("Please visit the following URL to authenticate:");
+        println!(
+            "{}",
+            response
+                .verification_uri_complete
+                .as_ref()
+                .unwrap_or(&response.verification_uri)
+        );
+        println!("User code: {}", response.user_code);
+    })
+    .await?;
+    let id_token = token_response.raw().to_string();
+    println!(
+        "Got identity token for: {}",
+        token_response.email().unwrap_or("unknown")
+    );
+
+    // 2. Keys: Generate ephemeral key pair
+    println!("Generating ephemeral key pair...");
+    let key_pair = KeyPair::generate_ecdsa_p256()?;
+    let public_key_pem = key_pair.public_key_to_pem()?;
+
+    // 3. Fulcio: Get Signing Certificate
+    println!("Requesting signing certificate from Fulcio...");
+    let fulcio_client = FulcioClient::public();
+
+    // Get public key in PEM format
+    println!("Public Key PEM:\n{}", public_key_pem);
+
+    // Create proof of possession
+    // The proof of possession is a signature over the subject (email) from the OIDC token
+    let email = token_response.email().ok_or("No email in token")?;
+    println!("Signing proof of possession for subject: {}", email);
+    let proof_of_possession = key_pair.sign(email.as_bytes())?;
+
+    let cert_response = fulcio_client
+        .create_signing_certificate(&id_token, &public_key_pem, &proof_of_possession)
+        .await?;
+
+    // Extract the leaf certificate (PEM)
+    let leaf_cert_pem = cert_response
+        .leaf_certificate()
+        .ok_or("No leaf certificate in response")?;
+
+    // For the bundle, we need the DER encoded certificate (base64)
+    let leaf_cert_der_b64 = pem_to_der_base64(leaf_cert_pem)?;
+
+    println!("Got signing certificate");
+
+    // 4. Sign the artifact
+    println!("Signing artifact...");
+
+    // Hash the artifact data
+    let mut hasher = Sha256::new();
+    hasher.update(&artifact_data);
+    let artifact_hash = hasher.finalize();
+    let artifact_hash_hex = hex::encode(artifact_hash);
+
+    // Sign the artifact data directly
+    let signature = key_pair.sign(&artifact_data)?;
+    let signature_b64 = signature.to_base64();
+
+    // 5. Rekor: Upload to Transparency Log
+    println!("Uploading to Rekor...");
+    let rekor = RekorClient::public();
+
+    // Create hashedrekord entry
+    let hashed_rekord = HashedRekord::new(&artifact_hash_hex, &signature_b64, leaf_cert_pem);
+
+    let log_entry = rekor.create_entry(hashed_rekord).await?;
+    println!("Created Rekor entry with index: {}", log_entry.log_index);
+
+    // 6. Bundle: Construct Sigstore Bundle
+    println!("Constructing bundle...");
+
+    // Convert log_id from hex to base64 (Rekor returns hex, bundle expects base64)
+    let log_id_bytes = hex::decode(&log_entry.log_i_d)?;
+    let log_id_base64 =
+        base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &log_id_bytes);
+
+    // Create Tlog entry for bundle
+    let mut tlog_builder = TlogEntryBuilder::new()
+        .log_index(log_entry.log_index as u64)
+        .log_id(log_id_base64)
+        .kind("hashedrekord".to_string(), "0.0.1".to_string())
+        .integrated_time(log_entry.integrated_time as u64)
+        .canonicalized_body(log_entry.body); // This is already base64 encoded in the response
+
+    // Add inclusion promise (SET) and inclusion proof if available
+    if let Some(verification) = &log_entry.verification {
+        // Add Signed Entry Timestamp (SET) as inclusion promise
+        if let Some(set) = &verification.signed_entry_timestamp {
+            tlog_builder = tlog_builder.inclusion_promise(set.clone());
+        }
+
+        // Add inclusion proof
+        if let Some(proof) = &verification.inclusion_proof {
+            // Convert hashes from hex to base64
+            let hashes_base64: Vec<String> = proof
+                .hashes
+                .iter()
+                .map(|h| {
+                    let bytes = hex::decode(h).unwrap_or_default();
+                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes)
+                })
+                .collect();
+
+            // Convert root_hash from hex to base64
+            let root_hash_bytes = hex::decode(&proof.root_hash).unwrap_or_default();
+            let root_hash_base64 = base64::Engine::encode(
+                &base64::engine::general_purpose::STANDARD,
+                &root_hash_bytes,
+            );
+
+            tlog_builder = tlog_builder.inclusion_proof(
+                proof.log_index as u64,
+                root_hash_base64,
+                proof.tree_size as u64,
+                hashes_base64,
+                proof.checkpoint.clone(),
+            );
+        }
+    }
+
+    let tlog_entry = tlog_builder.build();
+
+    let bundle = BundleBuilder::new()
+        .version(MediaType::Bundle0_3)
+        .certificate(leaf_cert_der_b64)
+        .message_signature(signature_b64)
+        .add_tlog_entry(tlog_entry)
+        .build()
+        .map_err(|e| format!("Failed to build bundle: {}", e))?;
+
+    // 7. Save Bundle
+    let bundle_json = bundle.to_json_pretty()?;
+    fs::write(&bundle_path, bundle_json)?;
+    println!("Bundle saved to: {:?}", bundle_path);
+    println!("You can verify this bundle with:");
+    println!("cosign verify-blob --bundle {} --certificate-identity {} --certificate-oidc-issuer https://oauth2.sigstore.dev/auth {}", 
+        bundle_path.display(), token_response.email().unwrap_or("unknown"), file_path.display());
+
+    Ok(())
+}
+
+fn pem_to_der_base64(pem: &str) -> Result<String, Box<dyn std::error::Error>> {
+    // Simple PEM parser: find BEGIN and END lines, take content between them, remove newlines
+    let start_marker = "-----BEGIN CERTIFICATE-----";
+    let end_marker = "-----END CERTIFICATE-----";
+
+    let start = pem
+        .find(start_marker)
+        .ok_or("Invalid PEM: missing start marker")?;
+    let end = pem
+        .find(end_marker)
+        .ok_or("Invalid PEM: missing end marker")?;
+
+    if start > end {
+        return Err("Invalid PEM: start after end".into());
+    }
+
+    let content = &pem[start + start_marker.len()..end];
+    let clean_content: String = content.chars().filter(|c| !c.is_whitespace()).collect();
+
+    Ok(clean_content)
+}

@@ -1,0 +1,57 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/sigstore-types",
+    "crates/sigstore-crypto",
+    "crates/sigstore-merkle",
+    "crates/sigstore-tsa",
+    "crates/sigstore-trust-root",
+    "crates/sigstore-bundle",
+    "crates/sigstore-rekor",
+    "crates/sigstore-fulcio",
+    "crates/sigstore-oidc",
+    "crates/sigstore",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+repository = "https://github.com/sigstore/sigultimate"
+rust-version = "1.70"
+
+[workspace.dependencies]
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+base64 = "0.22"
+
+# Error handling
+thiserror = "2.0"
+
+# Cryptography
+aws-lc-rs = "1.11"
+sha2 = "0.10"
+digest = "0.10"
+signature = "2.2"
+rand_core = { version = "0.6", features = ["getrandom"] }
+rand = "0.8"
+
+# ASN.1 / X.509
+der = { version = "0.7", features = ["alloc", "derive", "oid"] }
+spki = { version = "0.7", features = ["alloc"] }
+const-oid = "0.9"
+x509-cert = { version = "0.2", features = ["builder"] }
+
+# HTTP
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
+url = "2.5"
+
+# Async
+tokio = { version = "1.0", features = ["full"] }
+
+# Time
+chrono = { version = "0.4", features = ["serde"] }
+
+# Testing
+hex = "0.4"

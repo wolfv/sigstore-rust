@@ -1,0 +1,30 @@
+[package]
+name = "sigstore-trust-root"
+description = "Sigstore trusted root management and parsing"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Error handling
+thiserror = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Crypto & Certificates
+base64 = { workspace = true }
+x509-cert = { workspace = true }
+rustls-pki-types = "1.0"
+
+# Time handling
+chrono = { workspace = true }
+
+# Utilities
+hex = { workspace = true }
+
+[dev-dependencies]
+# For testing

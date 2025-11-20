@@ -1,0 +1,21 @@
+[package]
+name = "sigstore-bundle"
+description = "Bundle format handling for Sigstore"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sigstore-types = { path = "../sigstore-types" }
+sigstore-crypto = { path = "../sigstore-crypto" }
+sigstore-merkle = { path = "../sigstore-merkle" }
+sigstore-tsa = { path = "../sigstore-tsa" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+base64 = { workspace = true }
+
+[dev-dependencies]
+hex = { workspace = true }

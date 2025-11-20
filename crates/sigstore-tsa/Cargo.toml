@@ -1,0 +1,37 @@
+[package]
+name = "sigstore-tsa"
+description = "RFC 3161 Time-Stamp Protocol client for Sigstore"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sigstore-types = { path = "../sigstore-types" }
+sigstore-crypto = { path = "../sigstore-crypto" }
+aws-lc-rs = { workspace = true }
+der = { workspace = true }
+const-oid = { workspace = true }
+reqwest = { workspace = true, features = ["rustls-tls"] }
+thiserror = { workspace = true }
+base64 = { workspace = true }
+rand = { workspace = true }
+
+# RFC 3161 timestamp verification
+cms = { version = "0.2", default-features = false }
+x509-cert = { version = "0.2", default-features = false }
+x509-tsp = { version = "0.1", default-features = false }
+cmpv2 = { version = "0.2", default-features = false }
+rustls-webpki = { version = "0.103", default-features = false, features = ["alloc", "std"] }
+rustls-pki-types = { version = "1.0", default-features = false }
+chrono = { version = "0.4", default-features = false, features = ["std"] }
+tracing = { version = "0.1", optional = true }
+hex = { workspace = true }
+
+[dev-dependencies]
+hex = { workspace = true }
+tokio = { workspace = true }
+
+[features]
+default = ["tracing"]

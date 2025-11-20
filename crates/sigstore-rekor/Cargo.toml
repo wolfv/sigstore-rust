@@ -1,0 +1,23 @@
+[package]
+name = "sigstore-rekor"
+description = "Rekor transparency log client for Sigstore"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sigstore-types = { path = "../sigstore-types" }
+sigstore-crypto = { path = "../sigstore-crypto" }
+sigstore-merkle = { path = "../sigstore-merkle" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+reqwest = { workspace = true, features = ["rustls-tls"] }
+url = { workspace = true }
+thiserror = { workspace = true }
+base64 = { workspace = true }
+
+[dev-dependencies]
+hex = { workspace = true }
+tokio = { workspace = true }
