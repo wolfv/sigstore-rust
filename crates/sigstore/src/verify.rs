@@ -7,8 +7,8 @@ use base64::Engine;
 use serde::Serialize;
 use sigstore_bundle::validate_bundle_with_options;
 use sigstore_bundle::ValidationOptions;
-use sigstore_crypto::{verify_signature, Keyring, SignedNote, SigningScheme};
 use sigstore_crypto::{parse_certificate_info, x509};
+use sigstore_crypto::{verify_signature, Keyring, SignedNote, SigningScheme};
 use sigstore_rekor::body::RekorEntryBody;
 use sigstore_trust_root::TrustedRoot;
 use sigstore_tsa::{parse_timestamp, verify_timestamp_response, VerifyOpts as TsaVerifyOpts};
@@ -354,10 +354,14 @@ impl Verifier {
                             &entry.kind_version.kind,
                             &entry.kind_version.version,
                         )
-                        .map_err(|e| Error::Verification(format!("failed to parse Rekor body: {}", e)))?;
+                        .map_err(|e| {
+                            Error::Verification(format!("failed to parse Rekor body: {}", e))
+                        })?;
 
                         let expected_hash = match &body {
-                            RekorEntryBody::DsseV001(dsse_body) => &dsse_body.spec.envelope_hash.value,
+                            RekorEntryBody::DsseV001(dsse_body) => {
+                                &dsse_body.spec.envelope_hash.value
+                            }
                             _ => {
                                 return Err(Error::Verification(
                                     "expected DSSE v0.0.1 body, got different type".to_string(),
@@ -390,7 +394,9 @@ impl Verifier {
                             &entry.kind_version.kind,
                             &entry.kind_version.version,
                         )
-                        .map_err(|e| Error::Verification(format!("failed to parse Rekor body: {}", e)))?;
+                        .map_err(|e| {
+                            Error::Verification(format!("failed to parse Rekor body: {}", e))
+                        })?;
 
                         let (expected_hash, rekor_signatures) = match &body {
                             RekorEntryBody::DsseV002(dsse_body) => (
@@ -458,7 +464,9 @@ impl Verifier {
                         &entry.kind_version.kind,
                         &entry.kind_version.version,
                     )
-                    .map_err(|e| Error::Verification(format!("failed to parse Rekor body: {}", e)))?;
+                    .map_err(|e| {
+                        Error::Verification(format!("failed to parse Rekor body: {}", e))
+                    })?;
 
                     let (rekor_payload_b64, rekor_signatures) = match &body {
                         RekorEntryBody::IntotoV002(intoto_body) => (
@@ -505,8 +513,8 @@ impl Verifier {
                                     ))
                                 })?;
 
-                            let rekor_sig_content = String::from_utf8(rekor_sig_decoded)
-                                .map_err(|e| {
+                            let rekor_sig_content =
+                                String::from_utf8(rekor_sig_decoded).map_err(|e| {
                                     Error::Verification(format!(
                                         "Rekor signature not valid UTF-8: {}",
                                         e
@@ -637,7 +645,7 @@ impl Verifier {
                             .as_ref()
                             .map(|cert| (&cert.raw_bytes, false))
                     }
-                    _ => None
+                    _ => None,
                 };
 
                 if let Some((rekor_cert_encoded, is_pem)) = rekor_cert_str {
@@ -683,7 +691,10 @@ impl Verifier {
 
                             // Extract DER from PEM using our utility
                             x509::der_from_pem(&rekor_cert_pem_str).map_err(|e| {
-                                Error::Verification(format!("failed to extract DER from PEM: {}", e))
+                                Error::Verification(format!(
+                                    "failed to extract DER from PEM: {}",
+                                    e
+                                ))
                             })?
                         } else {
                             // v0.0.2 already has base64 DER
@@ -718,7 +729,7 @@ impl Verifier {
                         // v0.0.2: spec.hashedRekordV002.signature.content (base64)
                         Some(&rekord.spec.hashed_rekord_v002.signature.content)
                     }
-                    _ => None
+                    _ => None,
                 };
 
                 if let Some(rekor_sig_b64) = rekor_sig_b64 {

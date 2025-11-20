@@ -215,13 +215,11 @@ impl RekorEntryBody {
         version: &str,
     ) -> Result<Self, crate::error::Error> {
         // Decode base64
-        let body_bytes = base64::Engine::decode(
-            &base64::engine::general_purpose::STANDARD,
-            base64_body,
-        )
-        .map_err(|e| {
-            crate::error::Error::InvalidResponse(format!("failed to decode body: {}", e))
-        })?;
+        let body_bytes =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, base64_body)
+                .map_err(|e| {
+                    crate::error::Error::InvalidResponse(format!("failed to decode body: {}", e))
+                })?;
 
         // Convert to UTF-8 string
         let body_str = String::from_utf8(body_bytes).map_err(|e| {

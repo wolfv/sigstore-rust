@@ -206,9 +206,9 @@ pub fn parse_generalized_time(time_str: &str) -> Result<i64> {
     let naive_date = NaiveDate::from_ymd_opt(year, month, day)
         .ok_or_else(|| Error::Parse(format!("invalid date: {}-{}-{}", year, month, day)))?;
 
-    let naive_datetime = naive_date.and_hms_opt(hour, minute, second).ok_or_else(|| {
-        Error::Parse(format!("invalid time: {}:{}:{}", hour, minute, second))
-    })?;
+    let naive_datetime = naive_date
+        .and_hms_opt(hour, minute, second)
+        .ok_or_else(|| Error::Parse(format!("invalid time: {}:{}:{}", hour, minute, second)))?;
 
     // Convert to UTC timestamp
     let datetime = chrono::Utc.from_utc_datetime(&naive_datetime);
