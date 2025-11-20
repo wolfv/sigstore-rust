@@ -59,8 +59,8 @@ pub struct HashedRekordV001Signature {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublicKeyContent {
-    /// PEM or base64-encoded public key
-    pub content: String,
+    /// Base64-encoded PEM public key (double-encoded: base64 of PEM text)
+    pub content: Base64,
 }
 
 // ============================================================================

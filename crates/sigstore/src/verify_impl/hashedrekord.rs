@@ -134,10 +134,24 @@ fn validate_certificate_match(
     // Extract certificate DER from Rekor entry
     let rekor_cert_der_opt = match body {
         RekorEntryBody::HashedRekordV001(rekord) => {
-            // v0.0.1: spec.signature.publicKey.content (PEM string, not Base64 wrapper)
-            // This is PEM text, we need to decode it differently
-            let pem_content = &rekord.spec.signature.public_key.content;
-            Some(x509::der_from_pem(pem_content).map_err(|e| {
+            // v0.0.1: spec.signature.publicKey.content is base64-encoded PEM string
+            // Decode the base64 to get PEM text
+            let pem_bytes = rekord
+                .spec
+                .signature
+                .public_key
+                .content
+                .decode()
+                .map_err(|e| {
+                    Error::Verification(format!("failed to decode public key base64: {}", e))
+                })?;
+
+            let pem_str = String::from_utf8(pem_bytes).map_err(|e| {
+                Error::Verification(format!("public key PEM not valid UTF-8: {}", e))
+            })?;
+
+            // Extract DER from PEM
+            Some(x509::der_from_pem(&pem_str).map_err(|e| {
                 Error::Verification(format!("failed to extract DER from PEM: {}", e))
             })?)
         }
