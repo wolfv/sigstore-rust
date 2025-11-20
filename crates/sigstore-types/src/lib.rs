@@ -6,6 +6,7 @@
 pub mod bundle;
 pub mod checkpoint;
 pub mod dsse;
+pub mod encoding;
 pub mod error;
 pub mod hash;
 
@@ -18,5 +19,6 @@ pub use bundle::{
 };
 pub use checkpoint::{Checkpoint, CheckpointSignature};
 pub use dsse::{pae, DsseEnvelope, DsseSignature};
+pub use encoding::{Base64, Hex, Sha256Hash};
 pub use error::{Error, Result};
 pub use hash::{HashAlgorithm, HashOutput, MessageImprint};

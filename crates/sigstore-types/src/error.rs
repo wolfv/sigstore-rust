@@ -40,6 +40,10 @@ pub enum Error {
     /// Validation error
     #[error("Validation error: {0}")]
     Validation(String),
+
+    /// Invalid encoding (hex, base64, etc.)
+    #[error("Invalid encoding: {0}")]
+    InvalidEncoding(String),
 }
 
 /// Result type for sigstore-types operations

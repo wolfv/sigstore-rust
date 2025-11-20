@@ -8,7 +8,7 @@ use base64::Engine;
 use sigstore_crypto::x509;
 use sigstore_rekor::body::RekorEntryBody;
 use sigstore_types::bundle::VerificationMaterialContent;
-use sigstore_types::{Bundle, SignatureContent, TransparencyLogEntry};
+use sigstore_types::{Bundle, Sha256Hash, SignatureContent, TransparencyLogEntry};
 use x509_cert::der::Decode;
 use x509_cert::Certificate;
 
@@ -41,15 +41,24 @@ fn verify_hashedrekord_entry(
     )
     .map_err(|e| Error::Verification(format!("failed to parse Rekor body: {}", e)))?;
 
-    // Extract expected artifact hash
-    let (expected_hash, is_hex_encoded) = match &body {
+    // Extract expected artifact hash and validate
+    let artifact_hash_to_check = get_artifact_hash(artifact, &bundle.content, skip_artifact_hash)?;
+
+    match &body {
         RekorEntryBody::HashedRekordV001(rekord) => {
-            // v0.0.1: spec.data.hash.value (hex)
-            (&rekord.spec.data.hash.value, true)
+            // v0.0.1: spec.data.hash.value (hex-encoded)
+            let expected = Sha256Hash::from_hex(rekord.spec.data.hash.value.as_str())
+                .map_err(|e| Error::Verification(format!("invalid hash in Rekor entry: {}", e)))?;
+            validate_artifact_hash(&artifact_hash_to_check, &expected)?;
         }
         RekorEntryBody::HashedRekordV002(rekord) => {
-            // v0.0.2: spec.hashedRekordV002.data.digest (base64)
-            (&rekord.spec.hashed_rekord_v002.data.digest, false)
+            // v0.0.2: spec.hashedRekordV002.data.digest (base64-encoded)
+            let expected =
+                Sha256Hash::from_base64(rekord.spec.hashed_rekord_v002.data.digest.as_str())
+                    .map_err(|e| {
+                        Error::Verification(format!("invalid digest in Rekor entry: {}", e))
+                    })?;
+            validate_artifact_hash(&artifact_hash_to_check, &expected)?;
         }
         _ => {
             return Err(Error::Verification(format!(
@@ -58,12 +67,6 @@ fn verify_hashedrekord_entry(
             )))
         }
     };
-
-    // Get the artifact hash to compare
-    let artifact_hash_to_check = get_artifact_hash(artifact, &bundle.content, skip_artifact_hash)?;
-
-    // Compare hashes
-    validate_artifact_hash(&artifact_hash_to_check, expected_hash, is_hex_encoded)?;
 
     // Validate certificate matches
     validate_certificate_match(entry, &body, bundle)?;
@@ -82,24 +85,18 @@ fn get_artifact_hash(
     artifact: &[u8],
     content: &SignatureContent,
     skip_artifact_hash: bool,
-) -> Result<[u8; 32]> {
+) -> Result<Sha256Hash> {
     if !artifact.is_empty() {
         // We have the actual artifact, compute its hash
-        Ok(sigstore_crypto::sha256(artifact))
+        Ok(Sha256Hash::from_bytes(sigstore_crypto::sha256(artifact)))
     } else if skip_artifact_hash {
         // DIGEST mode - extract hash from bundle's message signature
         if let SignatureContent::MessageSignature(sig) = content {
             if let Some(digest) = &sig.message_digest {
-                // Decode the digest from the bundle
-                let digest_bytes = base64::engine::general_purpose::STANDARD
-                    .decode(&digest.digest)
-                    .map_err(|e| {
-                        Error::Verification(format!("failed to decode message digest: {}", e))
-                    })?;
-
-                digest_bytes
-                    .try_into()
-                    .map_err(|_| Error::Verification("message digest has wrong length".to_string()))
+                // Decode the digest from the bundle (base64-encoded)
+                Sha256Hash::from_base64(&digest.digest).map_err(|e| {
+                    Error::Verification(format!("failed to decode message digest: {}", e))
+                })
             } else {
                 Err(Error::Verification(
                     "no message digest in bundle for DIGEST mode".to_string(),
@@ -108,7 +105,7 @@ fn get_artifact_hash(
         } else {
             // For DSSE envelopes in DIGEST mode, we can't validate the hashedrekord
             // Return a dummy hash that won't match (validation will be skipped)
-            Ok([0u8; 32])
+            Ok(Sha256Hash::from_bytes([0u8; 32]))
         }
     } else {
         Err(Error::Verification(
@@ -118,20 +115,8 @@ fn get_artifact_hash(
 }
 
 /// Validate artifact hash matches expected hash
-fn validate_artifact_hash(
-    artifact_hash: &[u8; 32],
-    expected_hash: &str,
-    is_hex_encoded: bool,
-) -> Result<()> {
-    let matches = if is_hex_encoded {
-        let artifact_hash_hex = hex::encode(artifact_hash);
-        artifact_hash_hex == expected_hash
-    } else {
-        let artifact_hash_b64 = base64::engine::general_purpose::STANDARD.encode(artifact_hash);
-        artifact_hash_b64 == expected_hash
-    };
-
-    if !matches {
+fn validate_artifact_hash(artifact_hash: &Sha256Hash, expected_hash: &Sha256Hash) -> Result<()> {
+    if artifact_hash != expected_hash {
         return Err(Error::Verification(
             "artifact hash mismatch for hashedrekord entry".to_string(),
         ));
@@ -146,14 +131,18 @@ fn validate_certificate_match(
     body: &RekorEntryBody,
     bundle: &Bundle,
 ) -> Result<()> {
-    // Extract certificate from Rekor entry
-    let rekor_cert_str = match body {
+    // Extract certificate DER from Rekor entry
+    let rekor_cert_der_opt = match body {
         RekorEntryBody::HashedRekordV001(rekord) => {
-            // v0.0.1: spec.signature.publicKey.content (PEM encoded)
-            Some((&rekord.spec.signature.public_key.content, true))
+            // v0.0.1: spec.signature.publicKey.content (PEM string, not Base64 wrapper)
+            // This is PEM text, we need to decode it differently
+            let pem_content = &rekord.spec.signature.public_key.content;
+            Some(x509::der_from_pem(pem_content).map_err(|e| {
+                Error::Verification(format!("failed to extract DER from PEM: {}", e))
+            })?)
         }
         RekorEntryBody::HashedRekordV002(rekord) => {
-            // v0.0.2: spec.hashedRekordV002.signature.verifier.x509Certificate.rawBytes (base64 DER)
+            // v0.0.2: spec.hashedRekordV002.signature.verifier.x509Certificate.rawBytes (Base64 DER)
             rekord
                 .spec
                 .hashed_rekord_v002
@@ -161,12 +150,17 @@ fn validate_certificate_match(
                 .verifier
                 .x509_certificate
                 .as_ref()
-                .map(|cert| (&cert.raw_bytes, false))
+                .map(|cert| {
+                    cert.raw_bytes.decode().map_err(|e| {
+                        Error::Verification(format!("failed to decode Rekor certificate: {}", e))
+                    })
+                })
+                .transpose()?
         }
         _ => None,
     };
 
-    if let Some((rekor_cert_encoded, is_pem)) = rekor_cert_str {
+    if let Some(rekor_cert_der) = rekor_cert_der_opt {
         // Get the certificate from the bundle
         let bundle_cert_b64 = match &bundle.verification_material.content {
             VerificationMaterialContent::X509CertificateChain { certificates } => {
@@ -177,42 +171,12 @@ fn validate_certificate_match(
         };
 
         if let Some(bundle_cert_b64) = bundle_cert_b64 {
-            // Decode bundle certificate
+            // Decode bundle certificate (still String for now, will update bundle types next)
             let bundle_cert_der = base64::engine::general_purpose::STANDARD
                 .decode(bundle_cert_b64)
                 .map_err(|e| {
                     Error::Verification(format!("failed to decode bundle certificate: {}", e))
                 })?;
-
-            // Decode Rekor certificate
-            let rekor_cert_der = if is_pem {
-                // v0.0.1 uses PEM (double base64-encoded)
-                let rekor_cert_pem_decoded = base64::engine::general_purpose::STANDARD
-                    .decode(rekor_cert_encoded)
-                    .map_err(|e| {
-                        Error::Verification(format!(
-                            "failed to decode Rekor cert PEM base64: {}",
-                            e
-                        ))
-                    })?;
-
-                let rekor_cert_pem_str =
-                    String::from_utf8(rekor_cert_pem_decoded).map_err(|e| {
-                        Error::Verification(format!("Rekor cert PEM not valid UTF-8: {}", e))
-                    })?;
-
-                // Extract DER from PEM using our utility
-                x509::der_from_pem(&rekor_cert_pem_str).map_err(|e| {
-                    Error::Verification(format!("failed to extract DER from PEM: {}", e))
-                })?
-            } else {
-                // v0.0.2 already has base64 DER
-                base64::engine::general_purpose::STANDARD
-                    .decode(rekor_cert_encoded)
-                    .map_err(|e| {
-                        Error::Verification(format!("failed to decode Rekor cert DER: {}", e))
-                    })?
-            };
 
             // Compare certificates
             if bundle_cert_der != rekor_cert_der {

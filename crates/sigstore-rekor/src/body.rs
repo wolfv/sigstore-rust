@@ -4,6 +4,7 @@
 //! content for different Rekor entry types and versions.
 
 use serde::{Deserialize, Serialize};
+use sigstore_types::encoding::{Base64, Hex};
 
 /// Parsed Rekor entry body
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -44,18 +45,21 @@ pub struct HashedRekordV001Data {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HashValue {
     pub algorithm: String,
-    pub value: String,
+    /// Hex-encoded hash value (used in v0.0.1)
+    pub value: Hex,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct HashedRekordV001Signature {
-    pub content: String,
+    /// Base64-encoded signature
+    pub content: Base64,
     pub public_key: PublicKeyContent,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PublicKeyContent {
+    /// PEM or base64-encoded public key
     pub content: String,
 }
 
@@ -83,13 +87,13 @@ pub struct HashedRekordV002Data {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HashedRekordV002DataInner {
     /// Base64-encoded hash digest
-    pub digest: String,
+    pub digest: Base64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HashedRekordV002Signature {
     /// Base64-encoded signature
-    pub content: String,
+    pub content: Base64,
     pub verifier: HashedRekordV002Verifier,
 }
 
@@ -106,14 +110,14 @@ pub struct HashedRekordV002Verifier {
 #[serde(rename_all = "camelCase")]
 pub struct X509CertificateRaw {
     /// Base64-encoded DER certificate
-    pub raw_bytes: String,
+    pub raw_bytes: Base64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicKeyRaw {
     /// Base64-encoded public key
-    pub raw_bytes: String,
+    pub raw_bytes: Base64,
 }
 
 // ============================================================================
@@ -162,13 +166,14 @@ pub struct DsseV002Data {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PayloadHash {
     pub algorithm: String,
-    pub digest: String,
+    /// Base64-encoded hash digest
+    pub digest: Base64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DsseV002Signature {
     /// Base64-encoded signature content
-    pub content: String,
+    pub content: Base64,
 }
 
 // ============================================================================
@@ -193,14 +198,14 @@ pub struct IntotoV002Content {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntotoEnvelope {
     /// Base64-encoded payload (actually the payload is double-encoded in Rekor)
-    pub payload: String,
+    pub payload: Base64,
     pub signatures: Vec<IntotoSignature>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntotoSignature {
     /// Base64-encoded signature (double-encoded in Rekor)
-    pub sig: String,
+    pub sig: Base64,
 }
 
 // ============================================================================

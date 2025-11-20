@@ -15,7 +15,7 @@ use sigstore_crypto::Keyring;
 use sigstore_rekor::body::RekorEntryBody;
 use sigstore_trust_root::TrustedRoot;
 
-use sigstore_types::{Bundle, SignatureContent};
+use sigstore_types::{Bundle, Sha256Hash, SignatureContent};
 
 /// Policy for verifying signatures
 #[derive(Debug, Clone)]
@@ -313,8 +313,8 @@ impl Verifier {
                         })?;
 
                     // Compute artifact hash
-                    let artifact_hash = sigstore_crypto::sha256(artifact);
-                    let artifact_hash_hex = hex::encode(artifact_hash);
+                    let artifact_hash = Sha256Hash::from_bytes(sigstore_crypto::sha256(artifact));
+                    let artifact_hash_hex = artifact_hash.to_hex();
 
                     // Parse the in-toto statement to check subject digest
                     if let Ok(payload_str) = String::from_utf8(payload_bytes) {
