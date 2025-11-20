@@ -19,6 +19,9 @@ pub use bundle::{
 };
 pub use checkpoint::{Checkpoint, CheckpointSignature};
 pub use dsse::{pae, DsseEnvelope, DsseSignature};
-pub use encoding::{Base64, Hex, Sha256Hash};
+pub use encoding::{
+    Base64, Base64Der, Base64Hash, Base64Payload, Base64Pem, Base64Signature, Der, Hash, Hex,
+    KeyId, LogIndex, LogKeyId, Payload, Pem, Sha256Hash, Signature, Unknown,
+};
 pub use error::{Error, Result};
 pub use hash::{HashAlgorithm, HashOutput, MessageImprint};

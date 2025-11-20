@@ -45,7 +45,7 @@ impl BundleBuilder {
     pub fn certificate(mut self, cert_b64: String) -> Self {
         self.verification_content = Some(VerificationMaterialContent::Certificate(
             sigstore_types::bundle::CertificateContent {
-                raw_bytes: cert_b64,
+                raw_bytes: cert_b64.into(),
             },
         ));
         self
@@ -56,7 +56,7 @@ impl BundleBuilder {
         self.verification_content = Some(VerificationMaterialContent::X509CertificateChain {
             certificates: certs_b64
                 .into_iter()
-                .map(|c| sigstore_types::bundle::X509Certificate { raw_bytes: c })
+                .map(|c| sigstore_types::bundle::X509Certificate { raw_bytes: c.into() })
                 .collect(),
         });
         self
@@ -85,7 +85,7 @@ impl BundleBuilder {
     pub fn message_signature(mut self, signature: String) -> Self {
         self.signature_content = Some(SignatureContent::MessageSignature(MessageSignature {
             message_digest: None,
-            signature,
+            signature: signature.into(),
         }));
         self
     }

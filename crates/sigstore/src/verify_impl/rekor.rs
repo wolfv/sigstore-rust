@@ -91,8 +91,7 @@ fn verify_dsse_v002(
     };
 
     // Compute actual payload hash
-    let payload_bytes = base64::engine::general_purpose::STANDARD
-        .decode(&envelope.payload)
+    let payload_bytes = envelope.payload.decode()
         .map_err(|e| Error::Verification(format!("failed to decode DSSE payload: {}", e)))?;
     let payload_hash = sigstore_crypto::sha256(&payload_bytes);
     let payload_hash_b64 = base64::engine::general_purpose::STANDARD.encode(payload_hash);

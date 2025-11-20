@@ -2,96 +2,181 @@
 //!
 //! This module provides newtype wrappers around encoded data to prevent
 //! encoding confusion and provide compile-time safety.
+//!
+//! The Base64 type uses phantom types to track what content it contains,
+//! preventing mixing up certificates with signatures at compile time.
 
 use crate::error::{Error, Result};
 use base64::Engine;
 use serde::{Deserialize, Serialize};
+use std::marker::PhantomData;
 
-/// Base64-encoded data
+// ============================================================================
+// Phantom type markers for Base64 content
+// ============================================================================
+
+/// Marker: DER-encoded certificate or key
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Der;
+
+/// Marker: Cryptographic signature bytes
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Signature;
+
+/// Marker: DSSE payload
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Payload;
+
+/// Marker: Hash digest
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Hash;
+
+/// Marker: PEM text (base64-encoded PEM, double-encoded)
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Pem;
+
+/// Marker: Unknown or unspecified content
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Unknown;
+
+// ============================================================================
+// Type-safe Base64 wrapper with phantom type
+// ============================================================================
+
+/// Base64-encoded data with compile-time content tracking
 ///
-/// This type represents data that is base64-encoded (standard alphabet).
-/// It provides safe conversion to/from raw bytes.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+/// This type uses phantom types to track what the base64 encoding contains.
+/// This prevents accidentally mixing up different types of encoded data.
+///
+/// # Examples
+///
+/// ```ignore
+/// let cert: Base64<Der> = Base64::encode(cert_der_bytes);
+/// let sig: Base64<Signature> = Base64::encode(signature_bytes);
+///
+/// // ✅ This compiles - same type
+/// if cert == cert { }
+///
+/// // ❌ This doesn't compile - different types!
+/// // if cert == sig { }
+/// ```
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct Base64(String);
+pub struct Base64<T = Unknown> {
+    inner: String,
+    #[serde(skip)]
+    _phantom: PhantomData<T>,
+}
 
-impl Base64 {
+impl<T> Base64<T> {
     /// Create a new Base64 wrapper from a string
     ///
     /// Note: This does not validate the base64 encoding.
     /// Use `decode()` to validate and extract bytes.
     pub fn new(s: String) -> Self {
-        Base64(s)
+        Base64 {
+            inner: s,
+            _phantom: PhantomData,
+        }
     }
 
     /// Create a Base64 wrapper from raw bytes
     pub fn encode(bytes: &[u8]) -> Self {
-        Base64(base64::engine::general_purpose::STANDARD.encode(bytes))
+        Base64 {
+            inner: base64::engine::general_purpose::STANDARD.encode(bytes),
+            _phantom: PhantomData,
+        }
     }
 
     /// Decode the base64 string to bytes
     pub fn decode(&self) -> Result<Vec<u8>> {
         base64::engine::general_purpose::STANDARD
-            .decode(&self.0)
+            .decode(&self.inner)
             .map_err(|e| Error::InvalidEncoding(format!("invalid base64: {}", e)))
     }
 
     /// Get the underlying string slice
     pub fn as_str(&self) -> &str {
-        &self.0
+        &self.inner
     }
 
     /// Convert into the underlying String
     pub fn into_string(self) -> String {
-        self.0
+        self.inner
+    }
+
+    /// Cast to a different content type (use with caution!)
+    ///
+    /// This is useful when you need to change the phantom type marker.
+    /// The encoding itself is not changed, only the type marker.
+    pub fn cast<U>(self) -> Base64<U> {
+        Base64 {
+            inner: self.inner,
+            _phantom: PhantomData,
+        }
     }
 }
 
-impl From<String> for Base64 {
+impl<T> From<String> for Base64<T> {
     fn from(s: String) -> Self {
-        Base64(s)
+        Base64::new(s)
     }
 }
 
-impl AsRef<str> for Base64 {
+impl<T> AsRef<str> for Base64<T> {
     fn as_ref(&self) -> &str {
-        &self.0
+        &self.inner
     }
 }
 
-impl AsRef<[u8]> for Base64 {
+impl<T> AsRef<[u8]> for Base64<T> {
     fn as_ref(&self) -> &[u8] {
-        self.0.as_bytes()
+        self.inner.as_bytes()
     }
 }
 
-impl std::fmt::Display for Base64 {
+impl<T> std::fmt::Display for Base64<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
+        write!(f, "{}", self.inner)
     }
 }
 
-impl PartialEq<str> for Base64 {
+// PartialEq implementations
+impl<T> PartialEq for Base64<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.inner == other.inner
+    }
+}
+
+impl<T> Eq for Base64<T> {}
+
+impl<T> std::hash::Hash for Base64<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.inner.hash(state);
+    }
+}
+
+impl<T> PartialEq<str> for Base64<T> {
     fn eq(&self, other: &str) -> bool {
-        self.0 == other
+        self.inner == other
     }
 }
 
-impl PartialEq<String> for Base64 {
+impl<T> PartialEq<String> for Base64<T> {
     fn eq(&self, other: &String) -> bool {
-        &self.0 == other
+        &self.inner == other
     }
 }
 
-impl PartialEq<Base64> for String {
-    fn eq(&self, other: &Base64) -> bool {
-        self == &other.0
+impl<T> PartialEq<Base64<T>> for String {
+    fn eq(&self, other: &Base64<T>) -> bool {
+        self == &other.inner
     }
 }
 
-impl PartialEq<Base64> for &str {
-    fn eq(&self, other: &Base64) -> bool {
-        *self == other.0
+impl<T> PartialEq<Base64<T>> for &str {
+    fn eq(&self, other: &Base64<T>) -> bool {
+        *self == other.inner
     }
 }
 
@@ -142,6 +227,161 @@ impl From<String> for Hex {
 impl AsRef<str> for Hex {
     fn as_ref(&self) -> &str {
         &self.0
+    }
+}
+
+// ============================================================================
+// Identifier Types
+// ============================================================================
+
+/// Transparency log index (numeric string)
+///
+/// This type represents a log index in the transparency log.
+/// While stored as a string in JSON, it represents a numeric position.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LogIndex(String);
+
+impl LogIndex {
+    /// Create a new LogIndex from a string
+    pub fn new(s: String) -> Self {
+        LogIndex(s)
+    }
+
+    /// Create a LogIndex from a u64
+    pub fn from_u64(index: u64) -> Self {
+        LogIndex(index.to_string())
+    }
+
+    /// Get the underlying string slice
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Convert into the underlying String
+    pub fn into_string(self) -> String {
+        self.0
+    }
+
+    /// Parse as u64
+    pub fn as_u64(&self) -> Result<u64> {
+        self.0.parse().map_err(|e| {
+            Error::InvalidEncoding(format!("invalid log index '{}': {}", self.0, e))
+        })
+    }
+}
+
+impl From<String> for LogIndex {
+    fn from(s: String) -> Self {
+        LogIndex::new(s)
+    }
+}
+
+impl From<u64> for LogIndex {
+    fn from(index: u64) -> Self {
+        LogIndex::from_u64(index)
+    }
+}
+
+impl AsRef<str> for LogIndex {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for LogIndex {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Transparency log key ID (identifies a specific log)
+///
+/// This is typically a hash or other identifier for the transparency log.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct LogKeyId(String);
+
+impl LogKeyId {
+    /// Create a new LogKeyId from a string
+    pub fn new(s: String) -> Self {
+        LogKeyId(s)
+    }
+
+    /// Get the underlying string slice
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Convert into the underlying String
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl From<String> for LogKeyId {
+    fn from(s: String) -> Self {
+        LogKeyId::new(s)
+    }
+}
+
+impl AsRef<str> for LogKeyId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for LogKeyId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Key ID (for signature key identification)
+///
+/// This is an optional hint used in DSSE and other signature formats
+/// to help identify which key was used for signing.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct KeyId(String);
+
+impl KeyId {
+    /// Create a new KeyId from a string
+    pub fn new(s: String) -> Self {
+        KeyId(s)
+    }
+
+    /// Get the underlying string slice
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// Convert into the underlying String
+    pub fn into_string(self) -> String {
+        self.0
+    }
+
+    /// Check if the KeyId is empty
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl From<String> for KeyId {
+    fn from(s: String) -> Self {
+        KeyId::new(s)
+    }
+}
+
+impl AsRef<str> for KeyId {
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::fmt::Display for KeyId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
     }
 }
 
@@ -218,6 +458,25 @@ impl From<[u8; 32]> for Sha256Hash {
         Sha256Hash(bytes)
     }
 }
+
+// ============================================================================
+// Type aliases for common Base64 content types
+// ============================================================================
+
+/// Base64-encoded DER certificate or key
+pub type Base64Der = Base64<Der>;
+
+/// Base64-encoded cryptographic signature
+pub type Base64Signature = Base64<Signature>;
+
+/// Base64-encoded DSSE payload
+pub type Base64Payload = Base64<Payload>;
+
+/// Base64-encoded hash digest
+pub type Base64Hash = Base64<Hash>;
+
+/// Base64-encoded PEM text (double-encoded)
+pub type Base64Pem = Base64<Pem>;
 
 #[cfg(test)]
 mod tests {

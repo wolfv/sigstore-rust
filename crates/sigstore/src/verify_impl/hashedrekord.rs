@@ -94,7 +94,7 @@ fn get_artifact_hash(
         if let SignatureContent::MessageSignature(sig) = content {
             if let Some(digest) = &sig.message_digest {
                 // Decode the digest from the bundle (base64-encoded)
-                Sha256Hash::from_base64(&digest.digest).map_err(|e| {
+                Sha256Hash::from_base64(digest.digest.as_str()).map_err(|e| {
                     Error::Verification(format!("failed to decode message digest: {}", e))
                 })
             } else {

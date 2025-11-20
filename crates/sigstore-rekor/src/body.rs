@@ -4,7 +4,7 @@
 //! content for different Rekor entry types and versions.
 
 use serde::{Deserialize, Serialize};
-use sigstore_types::encoding::{Base64, Hex};
+use sigstore_types::encoding::{Base64, Base64Signature, Hex};
 
 /// Parsed Rekor entry body
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,7 +53,7 @@ pub struct HashValue {
 #[serde(rename_all = "camelCase")]
 pub struct HashedRekordV001Signature {
     /// Base64-encoded signature
-    pub content: Base64,
+    pub content: Base64Signature,
     pub public_key: PublicKeyContent,
 }
 
@@ -93,7 +93,7 @@ pub struct HashedRekordV002DataInner {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HashedRekordV002Signature {
     /// Base64-encoded signature
-    pub content: Base64,
+    pub content: Base64Signature,
     pub verifier: HashedRekordV002Verifier,
 }
 
@@ -173,7 +173,7 @@ pub struct PayloadHash {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DsseV002Signature {
     /// Base64-encoded signature content
-    pub content: Base64,
+    pub content: Base64Signature,
 }
 
 // ============================================================================
@@ -205,7 +205,7 @@ pub struct IntotoEnvelope {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IntotoSignature {
     /// Base64-encoded signature (double-encoded in Rekor)
-    pub sig: Base64,
+    pub sig: Base64Signature,
 }
 
 // ============================================================================

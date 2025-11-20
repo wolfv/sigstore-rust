@@ -6,6 +6,7 @@
 
 use crate::checkpoint::Checkpoint;
 use crate::dsse::DsseEnvelope;
+use crate::encoding::{Base64, Base64Signature, LogIndex, LogKeyId};
 use crate::error::{Error, Result};
 use crate::hash::HashAlgorithm;
 use serde::{Deserialize, Serialize};
@@ -99,7 +100,7 @@ impl Bundle {
     /// Get the signing certificate if present (base64-encoded DER)
     pub fn signing_certificate(&self) -> Option<&str> {
         match &self.verification_material.content {
-            VerificationMaterialContent::Certificate(cert) => Some(&cert.raw_bytes),
+            VerificationMaterialContent::Certificate(cert) => Some(cert.raw_bytes.as_str()),
             VerificationMaterialContent::X509CertificateChain { certificates } => {
                 certificates.first().map(|c| c.raw_bytes.as_str())
             }
@@ -142,7 +143,7 @@ pub struct MessageSignature {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message_digest: Option<MessageDigest>,
     /// The signature bytes (base64 encoded)
-    pub signature: String,
+    pub signature: Base64Signature,
 }
 
 /// Message digest with algorithm
@@ -152,7 +153,7 @@ pub struct MessageDigest {
     /// Hash algorithm
     pub algorithm: HashAlgorithm,
     /// Digest bytes (base64 encoded)
-    pub digest: String,
+    pub digest: Base64,
 }
 
 /// Verification material containing certificate/key and log entries
@@ -198,7 +199,7 @@ pub enum VerificationMaterialContent {
 #[serde(rename_all = "camelCase")]
 pub struct CertificateContent {
     /// Base64-encoded DER certificate
-    pub raw_bytes: String,
+    pub raw_bytes: Base64,
 }
 
 /// X.509 certificate in the chain
@@ -206,7 +207,7 @@ pub struct CertificateContent {
 #[serde(rename_all = "camelCase")]
 pub struct X509Certificate {
     /// Base64-encoded DER certificate
-    pub raw_bytes: String,
+    pub raw_bytes: Base64,
 }
 
 /// A transparency log entry
@@ -214,7 +215,7 @@ pub struct X509Certificate {
 #[serde(rename_all = "camelCase")]
 pub struct TransparencyLogEntry {
     /// Log index
-    pub log_index: String,
+    pub log_index: LogIndex,
     /// Log ID (base64 encoded)
     pub log_id: LogId,
     /// Kind and version of the entry
