@@ -349,7 +349,7 @@ impl std::fmt::Display for LogKeyId {
 ///
 /// This is an optional hint used in DSSE and other signature formats
 /// to help identify which key was used for signing.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct KeyId(String);
 
@@ -372,12 +372,6 @@ impl KeyId {
     /// Check if the KeyId is empty
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
-    }
-}
-
-impl Default for KeyId {
-    fn default() -> Self {
-        KeyId(String::new())
     }
 }
 
@@ -475,6 +469,25 @@ impl AsRef<[u8]> for Sha256Hash {
 impl From<[u8; 32]> for Sha256Hash {
     fn from(bytes: [u8; 32]) -> Self {
         Sha256Hash(bytes)
+    }
+}
+
+impl serde::Serialize for Sha256Hash {
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_str(&self.to_base64())
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Sha256Hash {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Sha256Hash::from_base64(&s).map_err(serde::de::Error::custom)
     }
 }
 

@@ -120,28 +120,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
         // Add inclusion proof
         if let Some(proof) = &verification.inclusion_proof {
-            // Convert hashes from hex to base64
-            let hashes_base64: Vec<String> = proof
+            // Hashes are already Base64-encoded, just convert to strings
+            let hashes: Vec<String> = proof
                 .hashes
                 .iter()
-                .map(|h| {
-                    let bytes = hex::decode(h).unwrap_or_default();
-                    base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes)
-                })
+                .map(|h| h.as_str().to_string())
                 .collect();
-
-            // Convert root_hash from hex to base64
-            let root_hash_bytes = hex::decode(&proof.root_hash).unwrap_or_default();
-            let root_hash_base64 = base64::Engine::encode(
-                &base64::engine::general_purpose::STANDARD,
-                &root_hash_bytes,
-            );
 
             tlog_builder = tlog_builder.inclusion_proof(
                 proof.log_index as u64,
-                root_hash_base64,
+                proof.root_hash.as_str().to_string(),
                 proof.tree_size as u64,
-                hashes_base64,
+                hashes,
                 proof.checkpoint.clone(),
             );
         }

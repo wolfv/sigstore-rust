@@ -162,9 +162,8 @@ fn validate_inclusion_proofs(bundle: &Bundle) -> Result<()> {
                 .parse()
                 .map_err(|_| Error::Validation("invalid tree_size in proof".to_string()))?;
 
-            // Get expected root from checkpoint
-            let expected_root = Sha256Hash::try_from_slice(&checkpoint.root_hash)
-                .map_err(|e| Error::Validation(format!("invalid checkpoint root hash: {}", e)))?;
+            // Get expected root from checkpoint (already a Sha256Hash)
+            let expected_root = checkpoint.root_hash;
 
             // Hash the leaf
             let leaf_hash = sigstore_merkle::hash_leaf(&leaf_data);

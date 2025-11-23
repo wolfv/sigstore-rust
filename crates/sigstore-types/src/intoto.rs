@@ -61,7 +61,7 @@ impl Statement {
                 .digest
                 .sha256
                 .as_ref()
-                .map_or(false, |h| h == hash_hex)
+                .is_some_and(|h| h == hash_hex)
         })
     }
 }

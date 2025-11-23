@@ -6,21 +6,28 @@
 //! - Message imprint validation
 //! - TSA Extended Key Usage validation
 
-use crate::asn1::TstInfo;
+use crate::asn1::{self, PkiStatus, TimeStampResp, TstInfo};
 use crate::error::{Error, Result};
 use chrono::{DateTime, Utc};
 use cms::cert::CertificateChoices;
 use cms::signed_data::{SignedData, SignerIdentifier};
 use const_oid::ObjectIdentifier;
 use rustls_pki_types::CertificateDer;
-use webpki::{anchor_from_trusted_cert, EndEntityCert, KeyUsage, ALL_VERIFICATION_ALGS};
 use x509_cert::Certificate;
 
-// TimeStamping Extended Key Usage OID (1.3.6.1.5.5.7.3.8)
-const ID_KP_TIME_STAMPING: ObjectIdentifier = const_oid::db::rfc5280::ID_KP_TIME_STAMPING;
+// Re-export webpki from rustls-webpki
+use webpki::{anchor_from_trusted_cert, EndEntityCert, KeyUsage, ALL_VERIFICATION_ALGS};
 
-// OID for message-digest attribute (1.2.840.113549.1.9.4)
+// Define OIDs as constants using const_oid::db
+const ID_KP_TIME_STAMPING: ObjectIdentifier = const_oid::db::rfc5280::ID_KP_TIME_STAMPING;
+const ID_SIGNED_DATA_STR: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.2.840.113549.1.7.2");
 const OID_MESSAGE_DIGEST: ObjectIdentifier = const_oid::db::rfc6268::ID_MESSAGE_DIGEST;
+const OID_SHA256: ObjectIdentifier = const_oid::db::rfc5912::ID_SHA_256;
+const OID_SHA384: ObjectIdentifier = const_oid::db::rfc5912::ID_SHA_384;
+const OID_SHA512: ObjectIdentifier = const_oid::db::rfc5912::ID_SHA_512;
+const OID_EC_PUBLIC_KEY: ObjectIdentifier = const_oid::db::rfc5912::ID_EC_PUBLIC_KEY;
+const OID_SECP256R1: ObjectIdentifier = const_oid::db::rfc5912::SECP_256_R_1;
+const OID_SECP384R1: ObjectIdentifier = const_oid::db::rfc5912::SECP_384_R_1;
 
 /// Verification options for RFC 3161 timestamps
 #[derive(Debug, Clone)]
@@ -123,11 +130,81 @@ pub fn verify_timestamp_response(
     signature_bytes: &[u8],
     opts: VerifyOpts<'_>,
 ) -> Result<TimestampResult> {
+    use cms::content_info::ContentInfo;
+    use x509_cert::der::{Decode, Encode};
+
     tracing::debug!("Starting RFC 3161 timestamp verification");
 
-    // Parse the timestamp token using the shared helper to avoid duplication
-    let (tst_info, signed_data, token_bytes) =
-        crate::parse::parse_timestamp_token(timestamp_token_bytes)?;
+    // Try to parse as TimeStampResp first, if that fails, try as ContentInfo
+    let (content_info, _token_bytes) = match TimeStampResp::from_der(timestamp_token_bytes) {
+        Ok(resp) => {
+            // Check status
+            if resp.status.status != PkiStatus::Granted as u8
+                && resp.status.status != PkiStatus::GrantedWithMods as u8
+            {
+                return Err(Error::ParseError(format!(
+                    "Timestamp request not granted: {}",
+                    resp.status.status
+                )));
+            }
+
+            let token_any = resp.time_stamp_token.ok_or(Error::ParseError(
+                "TimeStampResp missing timeStampToken".to_string(),
+            ))?;
+            // We need the DER bytes of the token for signature verification
+            let bytes = token_any
+                .to_der()
+                .map_err(|e| Error::ParseError(format!("failed to re-encode token: {}", e)))?;
+
+            // Parse ContentInfo from bytes
+            let token = ContentInfo::from_der(&bytes).map_err(|e| {
+                Error::ParseError(format!("failed to decode ContentInfo from token: {}", e))
+            })?;
+
+            (token, bytes)
+        }
+        Err(_) => {
+            // Try as ContentInfo directly
+            let token = ContentInfo::from_der(timestamp_token_bytes).map_err(|e| {
+                Error::ParseError(format!("failed to decode TimeStampToken: {}", e))
+            })?;
+            (token, timestamp_token_bytes.to_vec())
+        }
+    };
+
+    // Verify content type is SignedData
+    if content_info.content_type != ID_SIGNED_DATA_STR {
+        return Err(Error::ParseError(
+            "ContentInfo content type is not SignedData".to_string(),
+        ));
+    }
+
+    // We can encode the content to DER, which gives us the bytes of the SignedData structure
+    let signed_data_der = content_info
+        .content
+        .to_der()
+        .map_err(|e| Error::ParseError(format!("failed to encode SignedData content: {}", e)))?;
+
+    let signed_data = SignedData::from_der(&signed_data_der)
+        .map_err(|e| Error::ParseError(format!("failed to decode SignedData: {}", e)))?;
+
+    // Verify the content type inside SignedData is TSTInfo
+    if signed_data.encap_content_info.econtent_type != asn1::OID_TST_INFO {
+        return Err(Error::ParseError(
+            "encap content type is not TSTInfo".to_string(),
+        ));
+    }
+
+    // Extract the TSTInfo
+    let tst_info = if let Some(content) = &signed_data.encap_content_info.econtent {
+        // The content is an Any wrapping an OCTET STRING that contains the TSTInfo
+        let tst_info_bytes = content.value();
+
+        TstInfo::from_der(tst_info_bytes)
+            .map_err(|e| Error::ParseError(format!("failed to decode TSTInfo: {}", e)))?
+    } else {
+        return Err(Error::NoTstInfo);
+    };
 
     // Verify the message imprint (hash of the signature) matches
     verify_message_imprint(&tst_info, signature_bytes)?;
@@ -172,10 +249,7 @@ pub fn verify_timestamp_response(
         .value();
 
     tracing::debug!("Starting CMS signature verification");
-    // Note: verify_cms_signature expects timestamp_response_bytes to extract signed_attrs
-    // But now we are passing timestamp_token_bytes (ContentInfo).
-    // extract_signed_attrs_bytes needs to be updated to handle ContentInfo!
-    let signer_cert = verify_cms_signature(&signed_data, tst_info_der, &token_bytes, &opts)?;
+    let signer_cert = verify_cms_signature(&signed_data, tst_info_der, &opts)?;
     tracing::debug!("CMS signature verification completed successfully");
 
     // Extract intermediate certificates from the SignedData for chain validation
@@ -194,19 +268,20 @@ fn verify_message_imprint(tst_info: &TstInfo, signature_bytes: &[u8]) -> Result<
     use aws_lc_rs::digest::{digest, SHA256, SHA384, SHA512};
 
     let message_imprint = &tst_info.message_imprint;
-    let hash_alg_oid = message_imprint.hash_algorithm.algorithm.to_string();
+    let hash_alg_oid = &message_imprint.hash_algorithm.algorithm;
 
     // Hash the signature bytes using the algorithm specified in the message imprint
-    let computed_hash = match hash_alg_oid.as_str() {
-        "2.16.840.1.101.3.4.2.1" => digest(&SHA256, signature_bytes), // SHA-256
-        "2.16.840.1.101.3.4.2.2" => digest(&SHA384, signature_bytes), // SHA-384
-        "2.16.840.1.101.3.4.2.3" => digest(&SHA512, signature_bytes), // SHA-512
-        _ => {
-            return Err(Error::ParseError(format!(
-                "unsupported hash algorithm: {}",
-                hash_alg_oid
-            )))
-        }
+    let computed_hash = if hash_alg_oid == &OID_SHA256 {
+        digest(&SHA256, signature_bytes)
+    } else if hash_alg_oid == &OID_SHA384 {
+        digest(&SHA384, signature_bytes)
+    } else if hash_alg_oid == &OID_SHA512 {
+        digest(&SHA512, signature_bytes)
+    } else {
+        return Err(Error::ParseError(format!(
+            "unsupported hash algorithm: {}",
+            hash_alg_oid
+        )));
     };
 
     let expected_hash = message_imprint.hashed_message.as_bytes();
@@ -221,11 +296,29 @@ fn verify_message_imprint(tst_info: &TstInfo, signature_bytes: &[u8]) -> Result<
     Ok(())
 }
 
+/// Re-encode signed attributes for signature verification.
+///
+/// RFC 5652: The signed attributes are stored with [0] IMPLICIT tag in SignerInfo,
+/// but for signature verification they must be re-encoded as a generic SET OF.
+/// This strips the [0] tag and applies the default SET (0x31) tag.
+fn get_signed_attrs_for_verification(attrs: &x509_cert::attr::Attributes) -> Result<Vec<u8>> {
+    use x509_cert::der::{asn1::SetOfVec, Encode};
+
+    // Convert the attributes into a Vec first, then construct SetOfVec
+    let attrs_vec: Vec<x509_cert::attr::Attribute> = attrs.iter().cloned().collect();
+    let generic_set = SetOfVec::try_from(attrs_vec).map_err(|e| {
+        Error::SignatureVerificationError(format!("failed to create SetOfVec: {}", e))
+    })?;
+
+    generic_set.to_der().map_err(|e| {
+        Error::SignatureVerificationError(format!("failed to re-encode attributes: {}", e))
+    })
+}
+
 /// Verify the CMS signature and return the signer certificate
 fn verify_cms_signature(
     signed_data: &SignedData,
     tst_info_der: &[u8],
-    timestamp_response_bytes: &[u8],
     opts: &VerifyOpts,
 ) -> Result<Certificate> {
     // Get the first (and should be only) signer info
@@ -250,32 +343,29 @@ fn verify_cms_signature(
     // Find the signer certificate
     let signer_cert = find_signer_certificate(&signer_info.sid, &all_certs)?;
 
-    // Verify the message-digest attribute
-    if let Some(signed_attrs) = &signer_info.signed_attrs {
-        verify_message_digest_attribute(signed_attrs, tst_info_der)?;
-    } else {
-        return Err(Error::SignatureVerificationError(
-            "no signed attributes found".to_string(),
-        ));
-    }
+    // Get signed attributes and verify the message-digest attribute
+    let signed_attrs = signer_info.signed_attrs.as_ref().ok_or_else(|| {
+        Error::SignatureVerificationError("no signed attributes found".to_string())
+    })?;
 
-    // Extract signed_attrs bytes for signature verification
-    let signed_attrs_bytes = extract_signed_attrs_bytes(timestamp_response_bytes)?;
+    // Verify the message-digest attribute matches the TSTInfo
+    verify_message_digest_attribute(signed_attrs, tst_info_der)?;
+
+    // Re-encode attributes for signature verification
+    let signed_attrs_bytes = get_signed_attrs_for_verification(signed_attrs)?;
 
     // Verify the signature using the signer certificate's public key
-    // The signature field is a BitString, as_bytes() returns Option<&[u8]>
     let signature_bytes = signer_info.signature.as_bytes();
 
     // Get the digest algorithm OID from signer_info
-    let digest_alg_oid = signer_info.digest_alg.oid.to_string();
+    let digest_alg_oid = &signer_info.digest_alg.oid;
 
-    // Pass the unhashed signed_attrs_bytes - the verification function will hash it
-    // using the appropriate algorithm based on BOTH the curve and digest algorithm
+    // Verify the signature
     verify_ecdsa_signature(
         signature_bytes,
         &signed_attrs_bytes,
         &signer_cert,
-        &digest_alg_oid,
+        digest_alg_oid,
     )?;
 
     Ok(signer_cert)
@@ -415,7 +505,7 @@ fn verify_ecdsa_signature(
     signature: &[u8],
     message: &[u8],
     certificate: &Certificate,
-    digest_alg_oid: &str,
+    digest_alg_oid: &ObjectIdentifier,
 ) -> Result<()> {
     use aws_lc_rs::signature::{
         UnparsedPublicKey, ECDSA_P256_SHA256_ASN1, ECDSA_P384_SHA256_ASN1, ECDSA_P384_SHA384_ASN1,
@@ -427,71 +517,41 @@ fn verify_ecdsa_signature(
         Error::SignatureVerificationError("invalid public key encoding".to_string())
     })?;
 
-    // Determine the algorithm from the AlgorithmIdentifier
-    let alg_oid = spki.algorithm.oid.to_string();
-
-    match alg_oid.as_str() {
-        "1.2.840.10045.2.1" => {
-            // id-ecPublicKey - need to check the curve parameter
-            if let Some(params) = &spki.algorithm.parameters {
-                use x509_cert::der::asn1::ObjectIdentifier;
-
-                // Decode the curve OID
-                let curve_oid = params.decode_as::<ObjectIdentifier>().map_err(|e| {
-                    Error::SignatureVerificationError(format!("failed to decode curve OID: {}", e))
-                })?;
-
-                // Match on BOTH curve and digest algorithm
-                match (curve_oid.to_string().as_str(), digest_alg_oid) {
-                    ("1.2.840.10045.3.1.7", "2.16.840.1.101.3.4.2.1") => {
-                        // P-256 with SHA-256
-                        let key = UnparsedPublicKey::new(&ECDSA_P256_SHA256_ASN1, public_key_bytes);
-                        key.verify(message, signature).map_err(|_| {
-                            Error::SignatureVerificationError(
-                                "P-256 SHA-256 signature verification failed".to_string(),
-                            )
-                        })?;
-                    }
-                    ("1.3.132.0.34", "2.16.840.1.101.3.4.2.1") => {
-                        // P-384 with SHA-256
-                        let key = UnparsedPublicKey::new(&ECDSA_P384_SHA256_ASN1, public_key_bytes);
-                        key.verify(message, signature).map_err(|_| {
-                            Error::SignatureVerificationError(
-                                "P-384 SHA-256 signature verification failed".to_string(),
-                            )
-                        })?;
-                    }
-                    ("1.3.132.0.34", "2.16.840.1.101.3.4.2.2") => {
-                        // P-384 with SHA-384
-                        let key = UnparsedPublicKey::new(&ECDSA_P384_SHA384_ASN1, public_key_bytes);
-                        key.verify(message, signature).map_err(|_| {
-                            Error::SignatureVerificationError(
-                                "P-384 SHA-384 signature verification failed".to_string(),
-                            )
-                        })?;
-                    }
-                    (curve, digest) => {
-                        return Err(Error::SignatureVerificationError(format!(
-                            "unsupported curve/digest combination: {} / {}",
-                            curve, digest
-                        )));
-                    }
-                }
-            } else {
-                return Err(Error::SignatureVerificationError(
-                    "missing curve parameters for EC public key".to_string(),
-                ));
-            }
-        }
-        _ => {
-            return Err(Error::SignatureVerificationError(format!(
-                "unsupported signature algorithm: {}",
-                alg_oid
-            )));
-        }
+    // Check that the key algorithm is EC public key
+    if spki.algorithm.oid != OID_EC_PUBLIC_KEY {
+        return Err(Error::SignatureVerificationError(format!(
+            "not an EC key: {}",
+            spki.algorithm.oid
+        )));
     }
 
-    Ok(())
+    // Get the curve parameters
+    let params = spki.algorithm.parameters.as_ref().ok_or_else(|| {
+        Error::SignatureVerificationError("missing EC curve parameters".to_string())
+    })?;
+
+    // Decode the curve OID
+    let curve_oid = params.decode_as::<ObjectIdentifier>().map_err(|e| {
+        Error::SignatureVerificationError(format!("failed to decode curve OID: {}", e))
+    })?;
+
+    // Match on BOTH curve and digest algorithm to select the appropriate verification algorithm
+    let algorithm = match (&curve_oid, digest_alg_oid) {
+        (&OID_SECP256R1, &OID_SHA256) => &ECDSA_P256_SHA256_ASN1,
+        (&OID_SECP384R1, &OID_SHA256) => &ECDSA_P384_SHA256_ASN1,
+        (&OID_SECP384R1, &OID_SHA384) => &ECDSA_P384_SHA384_ASN1,
+        _ => {
+            return Err(Error::SignatureVerificationError(format!(
+                "unsupported curve/digest combination: {} / {}",
+                curve_oid, digest_alg_oid
+            )));
+        }
+    };
+
+    // Verify the signature
+    UnparsedPublicKey::new(algorithm, public_key_bytes)
+        .verify(message, signature)
+        .map_err(|_| Error::SignatureVerificationError("signature verification failed".to_string()))
 }
 
 /// Validate the TSA certificate chain
@@ -584,6 +644,7 @@ fn validate_tsa_certificate_chain(
             &intermediate_ders,
             verification_time,
             KeyUsage::required(ID_KP_TIME_STAMPING.as_bytes()),
+            // TODO: Double check this vs. sigstore-python / go
             None, // No revocation checking
             None, // No path verification callback
         )
@@ -597,136 +658,4 @@ fn validate_tsa_certificate_chain(
     tracing::debug!("TSA certificate chain validated successfully");
 
     Ok(())
-}
-
-/// Extract the raw signed_attrs bytes from the timestamp DER encoding.
-/// This function manually parses the DER structure to get the original bytes
-/// without re-encoding, which is critical for signature verification.
-///
-/// The signed_attrs field is stored with context-specific tag 0xA0 in the SignerInfo,
-/// but for signature verification it needs to be replaced with SET tag 0x31.
-fn extract_signed_attrs_bytes(timestamp_der: &[u8]) -> Result<Vec<u8>> {
-    use x509_cert::der::{Decode as _, Reader, SliceReader};
-
-    // We need to manually navigate through the DER structure to find signed_attrs
-    // and extract its raw bytes, then replace the tag [0] with SET tag
-
-    let mut reader = SliceReader::new(timestamp_der).map_err(|e| {
-        Error::SignatureVerificationError(format!("failed to create reader: {}", e))
-    })?;
-
-    // ContentInfo (SignedData wrapper)
-    let _content_info_header = x509_cert::der::Header::decode(&mut reader).map_err(|e| {
-        Error::SignatureVerificationError(format!("failed to decode ContentInfo: {}", e))
-    })?;
-
-    // Skip OID
-    let oid_header = x509_cert::der::Header::decode(&mut reader).map_err(|e| {
-        Error::SignatureVerificationError(format!("failed to decode OID header: {}", e))
-    })?;
-    reader
-        .read_slice(oid_header.length)
-        .map_err(|e| Error::SignatureVerificationError(format!("failed to skip OID: {}", e)))?;
-
-    // [0] EXPLICIT tag
-    let _explicit_tag = x509_cert::der::Header::decode(&mut reader).map_err(|e| {
-        Error::SignatureVerificationError(format!("failed to decode explicit tag: {}", e))
-    })?;
-
-    // SignedData SEQUENCE
-    let _signed_data_header = x509_cert::der::Header::decode(&mut reader).map_err(|e| {
-        Error::SignatureVerificationError(format!("failed to decode SignedData: {}", e))
-    })?;
-
-    // Skip version, digestAlgorithms, encapContentInfo
-    for _ in 0..3 {
-        let header = x509_cert::der::Header::decode(&mut reader).map_err(|e| {
-            Error::SignatureVerificationError(format!("failed to decode field: {}", e))
-        })?;
-        reader.read_slice(header.length).map_err(|e| {
-            Error::SignatureVerificationError(format!("failed to skip field: {}", e))
-        })?;
-    }
-
-    // Check for optional certificates [0]
-    if let Some(byte) = reader.peek_byte() {
-        if byte == 0xA0 {
-            let cert_header = x509_cert::der::Header::decode(&mut reader).map_err(|e| {
-                Error::SignatureVerificationError(format!("failed to decode certificates: {}", e))
-            })?;
-            reader.read_slice(cert_header.length).map_err(|e| {
-                Error::SignatureVerificationError(format!("failed to skip certificates: {}", e))
-            })?;
-        }
-    }
-
-    // Check for optional CRLs [1]
-    if let Some(byte) = reader.peek_byte() {
-        if byte == 0xA1 {
-            let crl_header = x509_cert::der::Header::decode(&mut reader).map_err(|e| {
-                Error::SignatureVerificationError(format!("failed to decode CRLs: {}", e))
-            })?;
-            reader.read_slice(crl_header.length).map_err(|e| {
-                Error::SignatureVerificationError(format!("failed to skip CRLs: {}", e))
-            })?;
-        }
-    }
-
-    // SignerInfos (SET OF)
-    let _signer_infos_header = x509_cert::der::Header::decode(&mut reader).map_err(|e| {
-        Error::SignatureVerificationError(format!("failed to decode SignerInfos: {}", e))
-    })?;
-
-    // First SignerInfo (SEQUENCE)
-    let _signer_info_header = x509_cert::der::Header::decode(&mut reader).map_err(|e| {
-        Error::SignatureVerificationError(format!("failed to decode SignerInfo: {}", e))
-    })?;
-
-    // Skip version, sid, digestAlgorithm
-    for _ in 0..3 {
-        let header = x509_cert::der::Header::decode(&mut reader).map_err(|e| {
-            Error::SignatureVerificationError(format!("failed to decode SignerInfo field: {}", e))
-        })?;
-        reader.read_slice(header.length).map_err(|e| {
-            Error::SignatureVerificationError(format!("failed to skip SignerInfo field: {}", e))
-        })?;
-    }
-
-    // signed_attrs [0] IMPLICIT
-    if let Some(byte) = reader.peek_byte() {
-        if byte == 0xA0 {
-            let attrs_header = x509_cert::der::Header::decode(&mut reader).map_err(|e| {
-                Error::SignatureVerificationError(format!("failed to decode signed_attrs: {}", e))
-            })?;
-
-            let attrs_bytes = reader.read_slice(attrs_header.length).map_err(|e| {
-                Error::SignatureVerificationError(format!("failed to read signed_attrs: {}", e))
-            })?;
-
-            // Create new bytes with SET tag (0x31) instead of [0] tag (0xA0)
-            let mut result = Vec::new();
-            result.push(0x31); // SET tag
-
-            // Encode length
-            let length = attrs_bytes.len();
-            if length < 128 {
-                result.push(length as u8);
-            } else if length < 256 {
-                result.push(0x81);
-                result.push(length as u8);
-            } else {
-                result.push(0x82);
-                result.push((length >> 8) as u8);
-                result.push((length & 0xFF) as u8);
-            }
-
-            result.extend_from_slice(attrs_bytes);
-
-            return Ok(result);
-        }
-    }
-
-    Err(Error::SignatureVerificationError(
-        "signed_attrs not found".to_string(),
-    ))
 }

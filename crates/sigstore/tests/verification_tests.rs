@@ -314,7 +314,7 @@ fn test_checkpoint_parsing() {
         "rekor.sigstore.dev - 1193050959916656506"
     );
     assert_eq!(checkpoint.tree_size, 44238955);
-    assert!(!checkpoint.root_hash.is_empty());
+    // root_hash is a Sha256Hash, always 32 bytes (validated by type)
 }
 
 #[test]
