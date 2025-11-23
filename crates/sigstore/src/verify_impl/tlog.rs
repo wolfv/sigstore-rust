@@ -95,8 +95,8 @@ pub fn verify_checkpoint(
     // Decode the root hash from the inclusion proof (auto-detects hex or base64 format)
     let proof_root_hash = sigstore_types::Sha256Hash::from_base64_ref(&inclusion_proof.root_hash)
         .map_err(|e| {
-            Error::Verification(format!("Failed to decode inclusion proof root hash: {}", e))
-        })?;
+        Error::Verification(format!("Failed to decode inclusion proof root hash: {}", e))
+    })?;
 
     if checkpoint_root_hash.as_slice() != proof_root_hash.as_slice() {
         return Err(Error::Verification(format!(
