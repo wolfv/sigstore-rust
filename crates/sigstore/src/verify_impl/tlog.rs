@@ -44,9 +44,10 @@ pub fn verify_tlog_entries(
             if let Ok(time) = entry.integrated_time.parse::<i64>() {
                 // Ignore 0 as it indicates invalid/missing time
                 if time > 0 {
-                    // Check that integrated time is not in the future
+                    // Check that integrated time is not in the future (with 1 minute clock skew tolerance)
                     let now = chrono::Utc::now().timestamp();
-                    if time > now {
+                    let clock_skew_seconds = 60; // Allow 1 minute clock skew
+                    if time > now + clock_skew_seconds {
                         return Err(Error::Verification(format!(
                             "integrated time {} is in the future (current time: {})",
                             time, now

@@ -26,6 +26,9 @@ base64 = { workspace = true }
 x509-cert = { workspace = true }
 hex = { workspace = true }
 cms = { version = "0.2", default-features = false }
+const-oid = { workspace = true }
+rustls-webpki = { version = "0.103", default-features = false, features = ["alloc", "std"] }
+rustls-pki-types = { version = "1.0", default-features = false }
 
 [dev-dependencies]
 tokio = { workspace = true }

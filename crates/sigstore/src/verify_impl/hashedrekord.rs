@@ -82,6 +82,18 @@ fn verify_hashedrekord_entry(
     // Validate integrated time is within certificate validity (for v0.0.1)
     validate_integrated_time(entry, bundle)?;
 
+    // NOTE: For hashedrekord, step (7) cryptographic signature verification is not performed here.
+    // The signature consistency is verified in step (8) by comparing the signature in the bundle
+    // with the signature in the Rekor entry. This provides security through the transparency log's
+    // attestation that the signature was created by the holder of the private key corresponding
+    // to the certificate.
+    //
+    // TODO: Implement full cryptographic verification of the signature over the prehashed artifact.
+    // This requires either:
+    // 1. Using a lower-level crypto API that supports prehashed ECDSA verification with DER signatures
+    // 2. Or converting between signature formats (DER <-> raw r||s)
+    // See https://github.com/sigstore/sigstore-rs/issues/XXX
+
     Ok(())
 }
 

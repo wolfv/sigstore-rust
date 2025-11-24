@@ -257,6 +257,20 @@ impl TrustedRoot {
         Ok(keys)
     }
 
+    /// Get all Certificate Transparency log public keys with their SHA-256 log IDs
+    /// Returns a list of (log_id, public_key) pairs where log_id is the SHA-256 hash
+    /// of the public key (used for matching against SCTs)
+    pub fn ctfe_keys_with_ids(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+        let mut result = Vec::new();
+        for ctlog in &self.ctlogs {
+            let key_bytes = ctlog.public_key.raw_bytes.decode()?;
+            // Compute SHA-256 hash of the public key to get the log ID
+            let log_id = sigstore_crypto::sha256(&key_bytes).to_vec();
+            result.push((log_id, key_bytes));
+        }
+        Ok(result)
+    }
+
     /// Get all TSA certificates with their validity periods
     pub fn tsa_certs_with_validity(&self) -> Result<Vec<TsaCertWithValidity>> {
         let mut result = Vec::new();

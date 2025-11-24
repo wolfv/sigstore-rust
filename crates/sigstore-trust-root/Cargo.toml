@@ -10,6 +10,7 @@ rust-version.workspace = true
 [dependencies]
 # Internal dependencies
 sigstore-types = { path = "../sigstore-types" }
+sigstore-crypto = { path = "../sigstore-crypto" }
 
 # Error handling
 thiserror = { workspace = true }

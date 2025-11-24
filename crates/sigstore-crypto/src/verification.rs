@@ -91,6 +91,60 @@ pub fn verify_signature(
     key.verify(data, signature)
 }
 
+/// Verify a signature over prehashed data using the specified scheme
+///
+/// This is used for hashedrekord verification where the signature is over
+/// the SHA-256 hash of the artifact, not the artifact itself.
+pub fn verify_signature_prehashed(
+    public_key: &[u8],
+    digest: &[u8],
+    signature: &[u8],
+    scheme: SigningScheme,
+) -> Result<()> {
+    use aws_lc_rs::signature::{
+        UnparsedPublicKey, ECDSA_P256_SHA256_FIXED, ECDSA_P384_SHA384_FIXED,
+    };
+
+    match scheme {
+        SigningScheme::EcdsaP256Sha256 => {
+            // For prehashed ECDSA, we need to use the FIXED variant which doesn't hash
+            // The digest should be 32 bytes (SHA-256)
+            if digest.len() != 32 {
+                return Err(Error::Verification(format!(
+                    "ECDSA P-256 prehashed verification requires 32-byte digest, got {}",
+                    digest.len()
+                )));
+            }
+            let key = UnparsedPublicKey::new(&ECDSA_P256_SHA256_FIXED, public_key);
+            key.verify(digest, signature)
+                .map_err(|_| Error::Verification("ECDSA P-256 signature invalid".to_string()))
+        }
+        SigningScheme::EcdsaP384Sha384 => {
+            // For prehashed ECDSA P-384, digest should be 48 bytes (SHA-384)
+            if digest.len() != 48 {
+                return Err(Error::Verification(format!(
+                    "ECDSA P-384 prehashed verification requires 48-byte digest, got {}",
+                    digest.len()
+                )));
+            }
+            let key = UnparsedPublicKey::new(&ECDSA_P384_SHA384_FIXED, public_key);
+            key.verify(digest, signature)
+                .map_err(|_| Error::Verification("ECDSA P-384 signature invalid".to_string()))
+        }
+        SigningScheme::Ed25519 => {
+            // Ed25519 doesn't support prehashed mode in the same way
+            // The signature is over the full message, not a hash
+            // Fall back to regular verification
+            verify_signature(public_key, digest, signature, scheme)
+        }
+        _ => {
+            // For other schemes (RSA), use regular verification
+            // RSA schemes in Sigstore typically sign the full message
+            verify_signature(public_key, digest, signature, scheme)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
