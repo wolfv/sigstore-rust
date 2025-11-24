@@ -30,6 +30,7 @@ const-oid = { workspace = true }
 tls_codec = { workspace = true }
 rustls-webpki = { version = "0.103", default-features = false, features = ["alloc", "std"] }
 rustls-pki-types = { version = "1.0", default-features = false }
+tracing = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }
@@ -41,3 +42,4 @@ serde = { workspace = true }
 [features]
 default = ["rustls-tls"]
 rustls-tls = []
+tuf = ["sigstore-trust-root/tuf"]

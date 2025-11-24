@@ -14,6 +14,9 @@ use sigstore_trust_root::TrustedRoot;
 
 use sigstore_types::{Bundle, Sha256Hash, SignatureContent, Statement};
 
+/// Default clock skew tolerance in seconds (60 seconds = 1 minute)
+pub const DEFAULT_CLOCK_SKEW_SECONDS: i64 = 60;
+
 /// Policy for verifying signatures
 #[derive(Debug, Clone)]
 pub struct VerificationPolicy {
@@ -29,6 +32,11 @@ pub struct VerificationPolicy {
     pub verify_certificate: bool,
     /// Skip artifact hash validation (for digest-only verification)
     pub skip_artifact_hash: bool,
+    /// Clock skew tolerance in seconds for time validation
+    ///
+    /// This allows for a tolerance when checking that integrated times
+    /// are not in the future. Default is 60 seconds.
+    pub clock_skew_seconds: i64,
 }
 
 impl Default for VerificationPolicy {
@@ -40,6 +48,7 @@ impl Default for VerificationPolicy {
             verify_timestamp: true,
             verify_certificate: true,
             skip_artifact_hash: false,
+            clock_skew_seconds: DEFAULT_CLOCK_SKEW_SECONDS,
         }
     }
 }
@@ -88,6 +97,15 @@ impl VerificationPolicy {
     /// Skip artifact hash validation (for digest-only verification)
     pub fn skip_artifact_hash(mut self) -> Self {
         self.skip_artifact_hash = true;
+        self
+    }
+
+    /// Set the clock skew tolerance in seconds
+    ///
+    /// This allows for a tolerance when checking that integrated times
+    /// are not in the future. Default is 60 seconds.
+    pub fn with_clock_skew_seconds(mut self, seconds: i64) -> Self {
+        self.clock_skew_seconds = seconds;
         self
     }
 }
@@ -261,6 +279,7 @@ impl Verifier {
                 self.trusted_root.as_ref(),
                 cert_info.not_before,
                 cert_info.not_after,
+                policy.clock_skew_seconds,
             )?;
 
             if let Some(time) = integrated_time {

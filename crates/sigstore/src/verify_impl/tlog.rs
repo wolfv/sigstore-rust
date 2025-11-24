@@ -12,11 +12,19 @@ use sigstore_types::bundle::InclusionProof;
 use sigstore_types::{Bundle, TransparencyLogEntry};
 
 /// Verify transparency log entries (checkpoints and SETs)
+///
+/// # Arguments
+/// * `bundle` - The bundle containing transparency log entries
+/// * `trusted_root` - Optional trusted root for cryptographic verification
+/// * `not_before` - Certificate validity start time (Unix timestamp)
+/// * `not_after` - Certificate validity end time (Unix timestamp)
+/// * `clock_skew_seconds` - Tolerance in seconds for future time checks
 pub fn verify_tlog_entries(
     bundle: &Bundle,
     trusted_root: Option<&TrustedRoot>,
     not_before: i64,
     not_after: i64,
+    clock_skew_seconds: i64,
 ) -> Result<Option<i64>> {
     let mut integrated_time_result: Option<i64> = None;
 
@@ -44,13 +52,12 @@ pub fn verify_tlog_entries(
             if let Ok(time) = entry.integrated_time.parse::<i64>() {
                 // Ignore 0 as it indicates invalid/missing time
                 if time > 0 {
-                    // Check that integrated time is not in the future (with 1 minute clock skew tolerance)
+                    // Check that integrated time is not in the future (with clock skew tolerance)
                     let now = chrono::Utc::now().timestamp();
-                    let clock_skew_seconds = 60; // Allow 1 minute clock skew
                     if time > now + clock_skew_seconds {
                         return Err(Error::Verification(format!(
-                            "integrated time {} is in the future (current time: {})",
-                            time, now
+                            "integrated time {} is in the future (current time: {}, tolerance: {}s)",
+                            time, now, clock_skew_seconds
                         )));
                     }
 
@@ -84,7 +91,7 @@ pub fn verify_checkpoint(
     inclusion_proof: &InclusionProof,
     trusted_root: &TrustedRoot,
 ) -> Result<()> {
-    use sigstore_crypto::checkpoint::{verify_ecdsa_p256, verify_ed25519};
+    use sigstore_crypto::verify_signature_auto;
 
     // Parse the signed note
     let signed_note = SignedNote::from_text(checkpoint_envelope)
@@ -117,22 +124,14 @@ pub fn verify_checkpoint(
         // Find the key with matching key hint
         for (key_hint, key_bytes) in &rekor_keys {
             if &sig.key_id == key_hint {
-                // Found matching key, verify the signature
+                // Found matching key, verify the signature using automatic key type detection
                 let message = signed_note.checkpoint_text.as_bytes();
 
-                // Try Ed25519 first
-                if verify_ed25519(key_bytes, &sig.signature, message).is_ok() {
-                    return Ok(());
-                }
+                verify_signature_auto(key_bytes, &sig.signature, message).map_err(|e| {
+                    Error::Verification(format!("Checkpoint signature verification failed: {}", e))
+                })?;
 
-                // Try ECDSA P-256
-                if verify_ecdsa_p256(key_bytes, &sig.signature, message).is_ok() {
-                    return Ok(());
-                }
-
-                return Err(Error::Verification(
-                    "Checkpoint signature verification failed".to_string(),
-                ));
+                return Ok(());
             }
         }
     }

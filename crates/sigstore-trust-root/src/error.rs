@@ -40,6 +40,10 @@ pub enum Error {
     /// Time parsing error
     #[error("failed to parse time: {0}")]
     TimeParse(String),
+
+    /// TUF error (only available with "tuf" feature)
+    #[error("TUF error: {0}")]
+    Tuf(String),
 }
 
 /// Result type for trusted root operations

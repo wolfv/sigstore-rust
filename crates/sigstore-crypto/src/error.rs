@@ -48,6 +48,10 @@ pub enum Error {
     /// Certificate parsing/validation error
     #[error("Certificate error: {0}")]
     InvalidCertificate(String),
+
+    /// Invalid key error
+    #[error("Invalid key: {0}")]
+    InvalidKey(String),
 }
 
 impl From<aws_lc_rs::error::Unspecified> for Error {

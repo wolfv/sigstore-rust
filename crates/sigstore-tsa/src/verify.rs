@@ -659,3 +659,238 @@ fn validate_tsa_certificate_chain(
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use base64::{engine::general_purpose::STANDARD, Engine as _};
+
+    // Test data from sigstore-conformance
+    const VALID_BUNDLE: &str = include_str!("../test_data/timestamps/valid_bundle.json");
+    const VALID_TRUSTED_ROOT: &str = include_str!("../test_data/timestamps/valid_trusted_root.json");
+    const PAYLOAD_MISMATCH_BUNDLE: &str =
+        include_str!("../test_data/timestamps/payload_mismatch_bundle.json");
+
+    /// Helper to extract timestamp token from bundle JSON
+    fn extract_timestamp_token(bundle_json: &str) -> Vec<u8> {
+        let bundle: serde_json::Value = serde_json::from_str(bundle_json).unwrap();
+        let timestamps = &bundle["verificationMaterial"]["timestampVerificationData"]
+            ["rfc3161Timestamps"];
+        let signed_ts = timestamps[0]["signedTimestamp"].as_str().unwrap();
+        STANDARD.decode(signed_ts).unwrap()
+    }
+
+    /// Helper to extract signature from bundle JSON
+    fn extract_signature(bundle_json: &str) -> Vec<u8> {
+        let bundle: serde_json::Value = serde_json::from_str(bundle_json).unwrap();
+        let sig = bundle["messageSignature"]["signature"].as_str().unwrap();
+        STANDARD.decode(sig).unwrap()
+    }
+
+    /// Helper to extract TSA certificates from trusted root JSON
+    fn extract_tsa_certs(trusted_root_json: &str) -> Vec<CertificateDer<'static>> {
+        let root: serde_json::Value = serde_json::from_str(trusted_root_json).unwrap();
+        let tsas = root["timestampAuthorities"].as_array().unwrap();
+
+        let mut certs = Vec::new();
+        for tsa in tsas {
+            let cert_chain = tsa["certChain"]["certificates"].as_array().unwrap();
+            for cert in cert_chain {
+                let raw_bytes = cert["rawBytes"].as_str().unwrap();
+                let der = STANDARD.decode(raw_bytes).unwrap();
+                certs.push(CertificateDer::from(der));
+            }
+        }
+        certs
+    }
+
+    #[test]
+    fn test_verify_valid_timestamp() {
+        // Extract timestamp token and signature from the bundle
+        let timestamp_token = extract_timestamp_token(VALID_BUNDLE);
+        let signature = extract_signature(VALID_BUNDLE);
+
+        // Extract TSA certificates from trusted root
+        let tsa_certs = extract_tsa_certs(VALID_TRUSTED_ROOT);
+
+        // The TSA has a self-signed root, so the last cert is the root
+        // and others are intermediates/leaf
+        let root = tsa_certs.last().unwrap().clone();
+        let intermediates: Vec<_> = tsa_certs[..tsa_certs.len() - 1].to_vec();
+
+        let opts = VerifyOpts::new()
+            .with_root(root)
+            .with_intermediates(intermediates);
+
+        // Verify the timestamp
+        let result = verify_timestamp_response(&timestamp_token, &signature, opts);
+        assert!(
+            result.is_ok(),
+            "Timestamp verification should succeed: {:?}",
+            result
+        );
+
+        let timestamp_result = result.unwrap();
+        // The timestamp should be a valid datetime
+        assert!(
+            timestamp_result.time.timestamp() > 0,
+            "Timestamp should be positive"
+        );
+    }
+
+    #[test]
+    fn test_verify_timestamp_without_roots_succeeds() {
+        // When no roots are provided, certificate chain validation is skipped
+        let timestamp_token = extract_timestamp_token(VALID_BUNDLE);
+        let signature = extract_signature(VALID_BUNDLE);
+
+        let opts = VerifyOpts::new();
+
+        // Should still succeed - just skips chain validation
+        let result = verify_timestamp_response(&timestamp_token, &signature, opts);
+        assert!(
+            result.is_ok(),
+            "Timestamp verification without roots should succeed: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_verify_timestamp_payload_mismatch() {
+        // This bundle has a valid timestamp but it doesn't match the signature
+        let timestamp_token = extract_timestamp_token(PAYLOAD_MISMATCH_BUNDLE);
+        let signature = extract_signature(PAYLOAD_MISMATCH_BUNDLE);
+
+        let opts = VerifyOpts::new();
+
+        // Should fail because the timestamp was created for a different signature
+        let result = verify_timestamp_response(&timestamp_token, &signature, opts);
+        assert!(result.is_err(), "Payload mismatch should be detected");
+
+        // Check that it's a hash mismatch error
+        let err = result.unwrap_err();
+        match err {
+            Error::HashMismatch { .. } => (),
+            other => panic!("Expected HashMismatch error, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_verify_timestamp_invalid_token() {
+        // Try to verify with invalid/garbage timestamp token
+        let invalid_token = b"this is not a valid timestamp token";
+        let signature = extract_signature(VALID_BUNDLE);
+
+        let opts = VerifyOpts::new();
+
+        let result = verify_timestamp_response(invalid_token, &signature, opts);
+        assert!(
+            result.is_err(),
+            "Invalid token should fail verification: {:?}",
+            result
+        );
+
+        // Check that it's a parse error
+        let err = result.unwrap_err();
+        match err {
+            Error::ParseError(_) => (),
+            other => panic!("Expected ParseError, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_verify_timestamp_empty_signature() {
+        // Try to verify with empty signature bytes
+        let timestamp_token = extract_timestamp_token(VALID_BUNDLE);
+        let empty_signature: &[u8] = &[];
+
+        let opts = VerifyOpts::new();
+
+        let result = verify_timestamp_response(&timestamp_token, empty_signature, opts);
+        assert!(
+            result.is_err(),
+            "Empty signature should fail verification: {:?}",
+            result
+        );
+
+        // Should be a hash mismatch since hash of empty bytes != expected hash
+        let err = result.unwrap_err();
+        match err {
+            Error::HashMismatch { .. } => (),
+            other => panic!("Expected HashMismatch error, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_verify_timestamp_wrong_signature() {
+        // Try to verify with wrong signature bytes (but valid length)
+        let timestamp_token = extract_timestamp_token(VALID_BUNDLE);
+        let wrong_signature = vec![0u8; 64]; // Wrong signature content
+
+        let opts = VerifyOpts::new();
+
+        let result = verify_timestamp_response(&timestamp_token, &wrong_signature, opts);
+        assert!(
+            result.is_err(),
+            "Wrong signature should fail verification: {:?}",
+            result
+        );
+
+        // Should be a hash mismatch
+        let err = result.unwrap_err();
+        match err {
+            Error::HashMismatch { .. } => (),
+            other => panic!("Expected HashMismatch error, got: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_verify_opts_builder() {
+        // Test the VerifyOpts builder pattern
+        let root = CertificateDer::from(vec![1, 2, 3]);
+        let intermediate = CertificateDer::from(vec![4, 5, 6]);
+        let tsa_cert = CertificateDer::from(vec![7, 8, 9]);
+
+        let start = DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+            .unwrap()
+            .to_utc();
+        let end = DateTime::parse_from_rfc3339("2025-01-01T00:00:00Z")
+            .unwrap()
+            .to_utc();
+
+        let opts = VerifyOpts::new()
+            .with_root(root.clone())
+            .with_intermediate(intermediate.clone())
+            .with_tsa_certificate(tsa_cert.clone())
+            .with_tsa_validity(start, end);
+
+        assert_eq!(opts.roots.len(), 1);
+        assert_eq!(opts.intermediates.len(), 1);
+        assert!(opts.tsa_certificate.is_some());
+        assert!(opts.tsa_valid_for.is_some());
+
+        let (valid_start, valid_end) = opts.tsa_valid_for.unwrap();
+        assert_eq!(valid_start, start);
+        assert_eq!(valid_end, end);
+    }
+
+    #[test]
+    fn test_verify_opts_with_multiple_certs() {
+        // Test adding multiple certificates at once
+        let roots = vec![
+            CertificateDer::from(vec![1, 2, 3]),
+            CertificateDer::from(vec![4, 5, 6]),
+        ];
+        let intermediates = vec![
+            CertificateDer::from(vec![7, 8, 9]),
+            CertificateDer::from(vec![10, 11, 12]),
+        ];
+
+        let opts = VerifyOpts::new()
+            .with_roots(roots)
+            .with_intermediates(intermediates);
+
+        assert_eq!(opts.roots.len(), 2);
+        assert_eq!(opts.intermediates.len(), 2);
+    }
+}

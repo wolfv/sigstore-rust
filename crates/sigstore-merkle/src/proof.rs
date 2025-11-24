@@ -39,6 +39,15 @@ pub fn verify_inclusion_proof(
         )));
     }
 
+    // Validate proof length matches expected for this tree size and leaf index
+    let expected_proof_len = expected_inclusion_proof_length(leaf_index, tree_size);
+    if proof_hashes.len() != expected_proof_len {
+        return Err(Error::InvalidProof(format!(
+            "expected {} proof hashes for leaf {} in tree of size {}, got {}",
+            expected_proof_len, leaf_index, tree_size, proof_hashes.len()
+        )));
+    }
+
     // Compute the root hash using the RFC 6962 algorithm
     // The proof hashes are processed from leaf to root
     let mut hash = *leaf_hash;
@@ -89,16 +98,29 @@ pub fn verify_consistency_proof(
     old_root: &Sha256Hash,
     new_root: &Sha256Hash,
 ) -> Result<()> {
-    if old_size == 0 {
-        // Empty tree is consistent with any tree
-        return Ok(());
-    }
-
     if old_size > new_size {
         return Err(Error::InvalidTreeSize(format!(
             "old size {} > new size {}",
             old_size, new_size
         )));
+    }
+
+    // Handle empty old tree case
+    if old_size == 0 {
+        // Empty tree is consistent with any tree, but proof must be empty
+        if !proof_hashes.is_empty() {
+            return Err(Error::InvalidProof(
+                "proof should be empty when old tree is empty".to_string(),
+            ));
+        }
+        // If both are empty, roots must match
+        if new_size == 0 && old_root != new_root {
+            return Err(Error::HashMismatch {
+                expected: old_root.to_hex(),
+                actual: new_root.to_hex(),
+            });
+        }
+        return Ok(());
     }
 
     if old_size == new_size {
@@ -192,6 +214,34 @@ fn decompose_inclusion_proof(index: u64, tree_size: u64) -> Result<(usize, usize
 /// Calculate the inner proof size for a given index and tree size
 fn inner_proof_size(index: u64, tree_size: u64) -> usize {
     bit_length(index ^ (tree_size - 1)) as usize
+}
+
+/// Calculate the expected inclusion proof length for a given leaf index and tree size
+///
+/// In RFC 6962 Merkle trees, the proof length depends on the path from leaf to root.
+/// Leaves at the right edge may be "promoted" when tree size is not a power of 2,
+/// resulting in shorter proofs.
+fn expected_inclusion_proof_length(leaf_index: u64, tree_size: u64) -> usize {
+    if tree_size <= 1 {
+        return 0;
+    }
+
+    let mut count = 0;
+    let mut index = leaf_index;
+    let mut size = tree_size;
+
+    while size > 1 {
+        // If odd number of nodes at this level and we're the rightmost,
+        // we get promoted (no sibling needed at this level)
+        if !(size % 2 == 1 && index == size - 1) {
+            count += 1;
+        }
+        // Move to parent level
+        index /= 2;
+        size = (size + 1) / 2;
+    }
+
+    count
 }
 
 /// Chain hashes along the inner proof path for new root verification

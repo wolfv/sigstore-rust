@@ -4,6 +4,7 @@
 //! large verification logic into manageable pieces.
 
 use crate::error::{Error, Result};
+use const_oid::db::rfc5912::{ECDSA_WITH_SHA_256, ECDSA_WITH_SHA_384, SECP_256_R_1, SECP_384_R_1};
 use sigstore_crypto::CertificateInfo;
 use sigstore_trust_root::TrustedRoot;
 use sigstore_tsa::parse_timestamp;
@@ -172,7 +173,7 @@ pub fn extract_tsa_timestamp(
                     }
                 }
                 Err(e) => {
-                    eprintln!("Warning: failed to parse TSA timestamp: {}", e);
+                    tracing::warn!("Failed to parse TSA timestamp: {}", e);
                 }
             }
         }
@@ -302,31 +303,23 @@ pub fn verify_certificate_chain(
                     Err(_) => continue,
                 };
 
-                // Map (curve, hash) to SigningScheme
-                let scheme = match (curve_oid.as_str(), sig_alg_oid) {
+                // Map (curve, hash) to SigningScheme using OID constants
+                let scheme = if curve_oid == SECP_256_R_1 && sig_alg_oid == ECDSA_WITH_SHA_256 {
                     // P-256 with SHA-256
-                    ("1.2.840.10045.3.1.7", oid)
-                        if oid
-                            == const_oid::ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2") =>
-                    {
-                        sigstore_crypto::SigningScheme::EcdsaP256Sha256
-                    }
+                    sigstore_crypto::SigningScheme::EcdsaP256Sha256
+                } else if curve_oid == SECP_256_R_1 && sig_alg_oid == ECDSA_WITH_SHA_384 {
                     // P-256 with SHA-384 (non-standard but valid)
-                    // Some test/mock certificates may use this combination
-                    ("1.2.840.10045.3.1.7", oid)
-                        if oid
-                            == const_oid::ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.3") =>
-                    {
-                        sigstore_crypto::SigningScheme::EcdsaP256Sha384
-                    }
+                    sigstore_crypto::SigningScheme::EcdsaP256Sha384
+                } else if curve_oid == SECP_384_R_1 && sig_alg_oid == ECDSA_WITH_SHA_384 {
                     // P-384 with SHA-384
-                    ("1.3.132.0.34", oid)
-                        if oid
-                            == const_oid::ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.3") =>
-                    {
-                        sigstore_crypto::SigningScheme::EcdsaP384Sha384
-                    }
-                    _ => continue,
+                    sigstore_crypto::SigningScheme::EcdsaP384Sha384
+                } else {
+                    tracing::warn!(
+                        "Unknown curve/signature algorithm combination: curve={}, sig_alg={}",
+                        curve_oid,
+                        sig_alg_oid
+                    );
+                    continue;
                 };
 
                 let Some(issuer_pub_key) = issuer_spki.subject_public_key.as_bytes() else {
@@ -359,12 +352,14 @@ pub fn verify_certificate_chain(
 /// Extract the EC curve OID from a SubjectPublicKeyInfo
 ///
 /// For EC keys, the algorithm parameters contain the curve OID
-fn extract_ec_curve_oid(spki: &x509_cert::spki::SubjectPublicKeyInfoOwned) -> Result<String> {
-    use x509_cert::der::Decode;
+fn extract_ec_curve_oid(
+    spki: &x509_cert::spki::SubjectPublicKeyInfoOwned,
+) -> Result<const_oid::ObjectIdentifier> {
+    use const_oid::db::rfc5912::ID_EC_PUBLIC_KEY;
+    use const_oid::ObjectIdentifier;
 
     // For EC keys, the algorithm OID should be id-ecPublicKey (1.2.840.10045.2.1)
-    let ec_public_key_oid = const_oid::ObjectIdentifier::new_unwrap("1.2.840.10045.2.1");
-    if spki.algorithm.oid != ec_public_key_oid {
+    if spki.algorithm.oid != ID_EC_PUBLIC_KEY {
         return Err(Error::Verification("Not an EC public key".to_string()));
     }
 
@@ -375,16 +370,13 @@ fn extract_ec_curve_oid(spki: &x509_cert::spki::SubjectPublicKeyInfoOwned) -> Re
         ));
     };
 
-    // The parameters are an ANY type that encodes a complete DER-encoded OID
-    // We can directly decode it as an ObjectIdentifier since ANY preserves the DER encoding
-    let params_der = params
-        .to_der()
-        .map_err(|e| Error::Verification(format!("failed to encode parameters: {}", e)))?;
+    // The AnyRef value() gives us the raw content bytes (without tag/length).
+    // For an OID, this is the encoded OID bytes.
+    // ObjectIdentifier::from_bytes expects raw OID bytes (without tag/length header).
+    let curve_oid = ObjectIdentifier::from_bytes(params.value())
+        .map_err(|e| Error::Verification(format!("failed to parse EC curve OID: {}", e)))?;
 
-    let curve_oid = const_oid::ObjectIdentifier::from_der(&params_der)
-        .map_err(|e| Error::Verification(format!("failed to decode curve OID: {}", e)))?;
-
-    Ok(curve_oid.to_string())
+    Ok(curve_oid)
 }
 
 /// Extract the original TBS (To Be Signed) certificate DER bytes from a certificate
@@ -543,6 +535,10 @@ pub fn verify_x509_profile(cert_der: &[u8]) -> Result<()> {
     use x509_cert::ext::pkix::{ExtendedKeyUsage, KeyUsage, KeyUsages};
     use x509_cert::Certificate;
 
+    // OID constants for X.509 extensions
+    use const_oid::db::rfc5280::{ID_CE_EXT_KEY_USAGE, ID_CE_KEY_USAGE};
+    use const_oid::db::rfc5912::ID_KP_CODE_SIGNING;
+
     let cert = Certificate::from_der(cert_der)
         .map_err(|e| Error::Verification(format!("failed to parse certificate: {}", e)))?;
 
@@ -555,7 +551,7 @@ pub fn verify_x509_profile(cert_der: &[u8]) -> Result<()> {
     // Check KeyUsage extension (OID 2.5.29.15)
     let key_usage_ext = extensions
         .iter()
-        .find(|ext| ext.extn_id.to_string() == "2.5.29.15")
+        .find(|ext| ext.extn_id == ID_CE_KEY_USAGE)
         .ok_or_else(|| {
             Error::Verification("certificate is missing KeyUsage extension".to_string())
         })?;
@@ -572,7 +568,7 @@ pub fn verify_x509_profile(cert_der: &[u8]) -> Result<()> {
     // Check ExtendedKeyUsage extension (OID 2.5.29.37)
     let eku_ext = extensions
         .iter()
-        .find(|ext| ext.extn_id.to_string() == "2.5.29.37")
+        .find(|ext| ext.extn_id == ID_CE_EXT_KEY_USAGE)
         .ok_or_else(|| {
             Error::Verification("certificate is missing ExtendedKeyUsage extension".to_string())
         })?;
@@ -582,8 +578,7 @@ pub fn verify_x509_profile(cert_der: &[u8]) -> Result<()> {
     })?;
 
     // Check for code signing OID (1.3.6.1.5.5.7.3.3)
-    let code_signing_oid = const_oid::ObjectIdentifier::new_unwrap("1.3.6.1.5.5.7.3.3");
-    if !eku.0.contains(&code_signing_oid) {
+    if !eku.0.contains(&ID_KP_CODE_SIGNING) {
         return Err(Error::Verification(
             "ExtendedKeyUsage extension does not contain codeSigning".to_string(),
         ));
@@ -595,7 +590,129 @@ pub fn verify_x509_profile(cert_der: &[u8]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sigstore_crypto::der_from_pem;
     use sigstore_trust_root::TrustedRoot;
+
+    // Test data from sigstore-python reference implementation
+    const BOGUS_LEAF_PEM: &str = include_str!("../../test_data/x509/bogus-leaf.pem");
+    const BOGUS_LEAF_INVALID_EKU_PEM: &str =
+        include_str!("../../test_data/x509/bogus-leaf-invalid-eku.pem");
+    const BOGUS_LEAF_MISSING_EKU_PEM: &str =
+        include_str!("../../test_data/x509/bogus-leaf-missing-eku.pem");
+    const BOGUS_LEAF_INVALID_KU_PEM: &str =
+        include_str!("../../test_data/x509/bogus-leaf-invalid-ku.pem");
+    const BOGUS_ROOT_PEM: &str = include_str!("../../test_data/x509/bogus-root.pem");
+
+    #[test]
+    fn test_verify_x509_profile_valid_leaf() {
+        // Valid leaf certificate should pass X.509 profile validation
+        let cert_der = der_from_pem(BOGUS_LEAF_PEM).expect("failed to parse PEM");
+        let result = verify_x509_profile(&cert_der);
+        assert!(
+            result.is_ok(),
+            "Valid leaf certificate should pass X.509 profile validation: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_verify_x509_profile_invalid_eku() {
+        // Certificate with invalid EKU (serverAuth instead of codeSigning)
+        let cert_der = der_from_pem(BOGUS_LEAF_INVALID_EKU_PEM).expect("failed to parse PEM");
+        let result = verify_x509_profile(&cert_der);
+        assert!(
+            result.is_err(),
+            "Certificate with invalid EKU should fail validation"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            format!("{:?}", err).contains("codeSigning"),
+            "Error should mention codeSigning: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_verify_x509_profile_missing_eku() {
+        // Certificate missing EKU extension entirely
+        let cert_der = der_from_pem(BOGUS_LEAF_MISSING_EKU_PEM).expect("failed to parse PEM");
+        let result = verify_x509_profile(&cert_der);
+        assert!(
+            result.is_err(),
+            "Certificate missing EKU should fail validation"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            format!("{:?}", err).contains("ExtendedKeyUsage"),
+            "Error should mention ExtendedKeyUsage: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_verify_x509_profile_invalid_ku() {
+        // Certificate with invalid KeyUsage (no bits set)
+        let cert_der = der_from_pem(BOGUS_LEAF_INVALID_KU_PEM).expect("failed to parse PEM");
+        let result = verify_x509_profile(&cert_der);
+        assert!(
+            result.is_err(),
+            "Certificate with invalid KeyUsage should fail validation"
+        );
+        let err = result.unwrap_err();
+        assert!(
+            format!("{:?}", err).contains("digitalSignature"),
+            "Error should mention digitalSignature: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_verify_x509_profile_root_cert() {
+        // Root CA certificate - not a leaf, should fail EKU check
+        let cert_der = der_from_pem(BOGUS_ROOT_PEM).expect("failed to parse PEM");
+        let result = verify_x509_profile(&cert_der);
+        // Root certs typically don't have codeSigning EKU
+        assert!(
+            result.is_err(),
+            "Root CA certificate should fail leaf validation"
+        );
+    }
+
+    #[test]
+    fn test_certificate_parsing_extracts_san() {
+        // Test that certificate parsing correctly extracts SAN identity
+        let cert_der = der_from_pem(BOGUS_LEAF_PEM).expect("failed to parse PEM");
+        let cert_info =
+            sigstore_crypto::parse_certificate_info(&cert_der).expect("failed to parse cert");
+
+        // The bogus-leaf.pem has a DNS SAN of bogus.example.com
+        // (which shows as None since it's a DNS name, not email/URI)
+        // This test verifies the parsing doesn't fail
+        assert!(cert_info.not_before > 0);
+        assert!(cert_info.not_after > cert_info.not_before);
+    }
+
+    #[test]
+    fn test_certificate_time_validation() {
+        let cert_der = der_from_pem(BOGUS_LEAF_PEM).expect("failed to parse PEM");
+        let cert_info =
+            sigstore_crypto::parse_certificate_info(&cert_der).expect("failed to parse cert");
+
+        // Test with time within validity period
+        let valid_time = cert_info.not_before + 1000;
+        let result = validate_certificate_time(valid_time, &cert_info);
+        assert!(result.is_ok(), "Should accept time within validity period");
+
+        // Test with time before validity period
+        let before_time = cert_info.not_before - 1;
+        let result = validate_certificate_time(before_time, &cert_info);
+        assert!(result.is_err(), "Should reject time before validity period");
+
+        // Test with time after validity period
+        let after_time = cert_info.not_after + 1;
+        let result = validate_certificate_time(after_time, &cert_info);
+        assert!(result.is_err(), "Should reject time after validity period");
+    }
 
     #[test]
     fn test_verify_sct_with_conformance_data() {

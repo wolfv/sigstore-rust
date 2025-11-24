@@ -266,6 +266,8 @@ impl SignedNote {
     /// This verifies that the signature over the checkpoint text is valid.
     /// The public key should match the key hint in the signature.
     ///
+    /// The key type is automatically detected from the SPKI structure.
+    ///
     /// Returns Ok(()) if verification succeeds, or an error if it fails.
     pub fn verify_signature(&self, public_key_der: &[u8]) -> Result<()> {
         // Compute key hint from public key
@@ -279,20 +281,9 @@ impl SignedNote {
         // The signed data is the checkpoint text (without the signatures part)
         let signed_data = self.checkpoint_text.as_bytes();
 
-        // Try to verify as different key types
-        // First try Ed25519
-        if let Ok(()) = verify_ed25519(public_key_der, &signature.signature, signed_data) {
-            return Ok(());
-        }
-
-        // Then try ECDSA P-256
-        if let Ok(()) = verify_ecdsa_p256(public_key_der, &signature.signature, signed_data) {
-            return Ok(());
-        }
-
-        Err(Error::Checkpoint(
-            "Signature verification failed".to_string(),
-        ))
+        // Use automatic key type detection
+        verify_signature_auto(public_key_der, &signature.signature, signed_data)
+            .map_err(|e| Error::Checkpoint(format!("Signature verification failed: {}", e)))
     }
 }
 
@@ -304,41 +295,123 @@ pub fn compute_key_hint(public_key_der: &[u8]) -> [u8; 4] {
     [hash[0], hash[1], hash[2], hash[3]]
 }
 
+// OID constants for key type identification
+use const_oid::db::rfc5912::ID_EC_PUBLIC_KEY;
+use const_oid::ObjectIdentifier;
+
+/// id-Ed25519: 1.3.101.112
+const ID_ED25519: ObjectIdentifier = ObjectIdentifier::new_unwrap("1.3.101.112");
+
+/// Key type detected from SPKI
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyType {
+    /// Ed25519 key
+    Ed25519,
+    /// ECDSA P-256 key
+    EcdsaP256,
+    /// Unknown/unsupported key type
+    Unknown,
+}
+
+/// Detect the key type from SPKI-encoded public key bytes.
+///
+/// This parses the SubjectPublicKeyInfo structure to determine the algorithm.
+pub fn detect_key_type(public_key_der: &[u8]) -> KeyType {
+    use spki::SubjectPublicKeyInfoRef;
+
+    match SubjectPublicKeyInfoRef::try_from(public_key_der) {
+        Ok(spki) => {
+            if spki.algorithm.oid == ID_ED25519 {
+                KeyType::Ed25519
+            } else if spki.algorithm.oid == ID_EC_PUBLIC_KEY {
+                KeyType::EcdsaP256
+            } else {
+                tracing::warn!("Unknown key algorithm OID: {}", spki.algorithm.oid);
+                KeyType::Unknown
+            }
+        }
+        Err(_) => {
+            // If we can't parse as SPKI, might be raw key bytes
+            // Check if it looks like a raw Ed25519 key (32 bytes)
+            if public_key_der.len() == 32 {
+                KeyType::Ed25519
+            } else {
+                KeyType::Unknown
+            }
+        }
+    }
+}
+
+/// Extract raw key bytes from SPKI-encoded public key.
+///
+/// For Ed25519, this extracts the 32-byte raw key from the SPKI wrapper.
+/// For ECDSA, the full SPKI is typically used by aws-lc-rs.
+pub fn extract_raw_key(public_key_der: &[u8]) -> Result<Vec<u8>> {
+    use spki::SubjectPublicKeyInfoRef;
+
+    match SubjectPublicKeyInfoRef::try_from(public_key_der) {
+        Ok(spki) => {
+            let raw_bytes = spki.subject_public_key.raw_bytes();
+            Ok(raw_bytes.to_vec())
+        }
+        Err(_) => {
+            // Already raw bytes
+            Ok(public_key_der.to_vec())
+        }
+    }
+}
+
 /// Verify an Ed25519 signature.
+///
+/// Accepts either SPKI-encoded or raw 32-byte public keys.
 pub fn verify_ed25519(public_key_der: &[u8], signature: &[u8], message: &[u8]) -> Result<()> {
     use aws_lc_rs::signature;
 
-    // For Ed25519, the public key DER encoding includes an OID prefix
-    // We need to extract the raw 32-byte key
-    // Ed25519 public key DER format: 0x30 0x2a 0x30 0x05 0x06 0x03 0x2b 0x65 0x70 0x03 0x21 0x00 [32 bytes]
-    let raw_key = if public_key_der.len() == 44
-        && public_key_der.starts_with(&[
-            0x30, 0x2a, 0x30, 0x05, 0x06, 0x03, 0x2b, 0x65, 0x70, 0x03, 0x21, 0x00,
-        ]) {
-        &public_key_der[12..]
-    } else {
-        // Assume it's already raw
-        public_key_der
-    };
+    // Extract raw key bytes from SPKI if needed
+    let raw_key = extract_raw_key(public_key_der)?;
 
-    let public_key = signature::UnparsedPublicKey::new(&signature::ED25519, raw_key);
+    let public_key = signature::UnparsedPublicKey::new(&signature::ED25519, &raw_key);
     public_key
         .verify(message, signature)
         .map_err(|_| Error::Verification("Ed25519 verification failed".to_string()))
 }
 
 /// Verify an ECDSA P-256 signature.
+///
+/// Expects SPKI-encoded public key (as produced by x509 certificates).
 pub fn verify_ecdsa_p256(public_key_der: &[u8], signature: &[u8], message: &[u8]) -> Result<()> {
     use aws_lc_rs::signature;
 
-    // Parse the public key
+    // aws-lc-rs expects the full SPKI for ECDSA, or raw uncompressed point
     let public_key =
         signature::UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_ASN1, public_key_der);
 
-    // Verify the signature
     public_key
         .verify(message, signature)
         .map_err(|_| Error::Verification("ECDSA P-256 verification failed".to_string()))
+}
+
+/// Verify a signature using automatic key type detection.
+///
+/// This function detects the key type from the SPKI structure and calls
+/// the appropriate verification function.
+pub fn verify_signature_auto(
+    public_key_der: &[u8],
+    signature: &[u8],
+    message: &[u8],
+) -> Result<()> {
+    match detect_key_type(public_key_der) {
+        KeyType::Ed25519 => verify_ed25519(public_key_der, signature, message),
+        KeyType::EcdsaP256 => verify_ecdsa_p256(public_key_der, signature, message),
+        KeyType::Unknown => {
+            // Fallback: try both (maintains backwards compatibility)
+            tracing::debug!("Unknown key type, trying Ed25519 then ECDSA P-256");
+            if verify_ed25519(public_key_der, signature, message).is_ok() {
+                return Ok(());
+            }
+            verify_ecdsa_p256(public_key_der, signature, message)
+        }
+    }
 }
 
 #[cfg(test)]

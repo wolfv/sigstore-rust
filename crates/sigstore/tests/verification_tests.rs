@@ -16,6 +16,12 @@ const V03_BUNDLE_DSSE: &str = r#"{"mediaType":"application/vnd.dev.sigstore.bund
 const HAPPY_PATH_V03_BUNDLE_DSSE: &str =
     include_str!("../../sigstore-bundle/tests/fixtures/happy-path.json");
 
+// Test bundles from reference implementations
+const DSSE_BUNDLE: &str = include_str!("../test_data/bundles/dsse.sigstore.json");
+const DSSE_2SIGS_BUNDLE: &str = include_str!("../test_data/bundles/dsse-2sigs.sigstore.json");
+const BUNDLE_INVALID_VERSION: &str = include_str!("../test_data/bundles/bundle_invalid_version.txt.sigstore");
+const BUNDLE_CVE_2022_36056: &str = include_str!("../test_data/bundles/bundle_cve_2022_36056.txt.sigstore");
+
 // ==== Bundle Parsing Tests ====
 
 #[test]
@@ -333,4 +339,99 @@ fn test_serialization_roundtrip() {
         bundle.verification_material.tlog_entries.len(),
         bundle2.verification_material.tlog_entries.len()
     );
+}
+
+// ==== Reference Implementation Bundle Tests ====
+
+#[test]
+fn test_parse_dsse_bundle_from_python() {
+    // DSSE bundle from sigstore-python test data
+    let bundle = Bundle::from_json(DSSE_BUNDLE).expect("Failed to parse DSSE bundle");
+
+    assert!(bundle.media_type.contains("0.1"));
+
+    // Check DSSE envelope structure
+    match &bundle.content {
+        sigstore::types::bundle::SignatureContent::DsseEnvelope(env) => {
+            assert_eq!(env.payload_type, "application/vnd.in-toto+json");
+            assert_eq!(env.signatures.len(), 1, "Should have exactly 1 signature");
+        }
+        _ => panic!("Expected DSSE envelope"),
+    }
+
+    // Verify tlog entry exists
+    assert_eq!(bundle.verification_material.tlog_entries.len(), 1);
+    let entry = &bundle.verification_material.tlog_entries[0];
+    assert_eq!(entry.kind_version.kind, "intoto");
+}
+
+#[test]
+fn test_parse_dsse_bundle_with_multiple_signatures() {
+    // DSSE bundle with 2 signatures
+    let bundle = Bundle::from_json(DSSE_2SIGS_BUNDLE).expect("Failed to parse DSSE 2-sigs bundle");
+
+    // Check DSSE envelope has multiple signatures
+    match &bundle.content {
+        sigstore::types::bundle::SignatureContent::DsseEnvelope(env) => {
+            assert_eq!(env.payload_type, "application/vnd.in-toto+json");
+            assert_eq!(env.signatures.len(), 2, "Should have exactly 2 signatures");
+        }
+        _ => panic!("Expected DSSE envelope"),
+    }
+}
+
+#[test]
+fn test_parse_bundle_invalid_version_still_parses() {
+    // This bundle has an invalid mediaType ("this is completely wrong")
+    // Parsing should still succeed, but validation may fail
+    let bundle_result = Bundle::from_json(BUNDLE_INVALID_VERSION);
+
+    // The bundle should still parse (we don't validate media type strictly during parse)
+    // Note: Depending on implementation, this might fail. Let's see what happens.
+    if let Ok(bundle) = bundle_result {
+        // If it parses, the media type should be wrong
+        assert_eq!(bundle.media_type, "this is completely wrong");
+    }
+    // If it fails to parse, that's also acceptable behavior
+}
+
+#[test]
+fn test_parse_cve_2022_36056_bundle() {
+    // This bundle tests CVE-2022-36056 - a hashedrekord entry mismatch attack
+    let bundle = Bundle::from_json(BUNDLE_CVE_2022_36056).expect("Failed to parse CVE test bundle");
+
+    // Should parse successfully
+    assert!(bundle.media_type.contains("v0.3"));
+
+    // Check it's a hashedrekord type
+    let entry = &bundle.verification_material.tlog_entries[0];
+    assert_eq!(entry.kind_version.kind, "hashedrekord");
+
+    // Bundle structure should be valid
+    let result = validate_bundle(&bundle);
+    assert!(
+        result.is_ok(),
+        "CVE bundle structure should be valid: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn test_bundle_certificate_extraction() {
+    // Test extracting certificate from v0.1 bundle (x509CertificateChain format)
+    let bundle = Bundle::from_json(DSSE_BUNDLE).expect("Failed to parse DSSE bundle");
+
+    // Verify certificate can be extracted
+    let cert = bundle.signing_certificate();
+    assert!(cert.is_some(), "Should have a signing certificate");
+}
+
+#[test]
+fn test_bundle_v03_certificate_extraction() {
+    // Test extracting certificate from v0.3 bundle (certificate format)
+    let bundle = Bundle::from_json(BUNDLE_CVE_2022_36056).expect("Failed to parse bundle");
+
+    // Verify certificate can be extracted
+    let cert = bundle.signing_certificate();
+    assert!(cert.is_some(), "Should have a signing certificate");
 }

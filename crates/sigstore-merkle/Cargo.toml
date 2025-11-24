@@ -17,3 +17,4 @@ hex = { workspace = true }
 [dev-dependencies]
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+rstest = "0.23"

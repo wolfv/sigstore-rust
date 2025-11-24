@@ -4,6 +4,7 @@
 //! using aws-lc-rs as the cryptographic backend.
 
 pub mod checkpoint;
+pub mod encoding;
 pub mod error;
 pub mod hash;
 pub mod keyring;
@@ -11,10 +12,14 @@ pub mod signing;
 pub mod verification;
 pub mod x509;
 
-pub use checkpoint::{compute_key_hint, LogCheckpoint, NoteSignature, SignedNote};
+pub use checkpoint::{
+    compute_key_hint, detect_key_type, extract_raw_key, verify_ecdsa_p256, verify_ed25519,
+    verify_signature_auto, KeyType, LogCheckpoint, NoteSignature, SignedNote,
+};
+pub use encoding::{CertificateDer, DerBytes, KeyHint, PublicKeySpki, SignatureBytes};
 pub use error::{Error, Result};
 pub use hash::{sha256, sha384, sha512, Sha256Hasher};
 pub use keyring::Keyring;
 pub use signing::{KeyPair, PublicKeyPem, Signature, SigningScheme};
 pub use verification::{verify_signature, verify_signature_prehashed, VerificationKey};
-pub use x509::{parse_certificate_info, CertificateInfo};
+pub use x509::{der_from_pem, der_from_pem_any, parse_certificate_info, CertificateInfo};
