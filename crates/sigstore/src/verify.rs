@@ -219,7 +219,7 @@ impl Verifier {
         verify_impl::helpers::validate_certificate_time(validation_time, &cert_info)?;
 
         // (2): Verify the signing certificate's SCT.
-        verify_impl::helpers::verify_sct(&cert_der, self.trusted_root.as_ref())?;
+        verify_impl::helpers::verify_sct(&bundle.verification_material.content, self.trusted_root.as_ref())?;
 
         // (3): Verify that the signing certificate conforms to the Sigstore
         //      X.509 profile and verify against the given `VerificationPolicy`.

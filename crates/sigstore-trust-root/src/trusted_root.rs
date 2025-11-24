@@ -101,7 +101,8 @@ pub struct TimestampAuthority {
     pub subject: Subject,
 
     /// URI of the TSA
-    pub uri: String,
+    #[serde(default)]
+    pub uri: Option<String>,
 
     /// Certificate chain
     pub cert_chain: CertChain,

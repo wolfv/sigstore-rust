@@ -331,7 +331,10 @@ pub fn verify_certificate_chain(
 ///
 /// CRITICAL: Embedded SCTs sign the Pre-Certificate, not the final certificate.
 /// We must reconstruct the Pre-Certificate TBS by removing the SCT extension.
-pub fn verify_sct(cert_der: &[u8], trusted_root: Option<&TrustedRoot>) -> Result<()> {
+pub fn verify_sct(
+    verification_material: &VerificationMaterialContent,
+    trusted_root: Option<&TrustedRoot>
+) -> Result<()> {
     use x509_cert::der::Decode;
     use x509_cert::Certificate;
 
@@ -340,8 +343,11 @@ pub fn verify_sct(cert_der: &[u8], trusted_root: Option<&TrustedRoot>) -> Result
         return Ok(());
     };
 
+    // Extract certificate for verification
+    let cert_der = extract_certificate_der(verification_material)?;
+
     // Parse the certificate to access extensions
-    let cert = Certificate::from_der(cert_der)
+    let cert = Certificate::from_der(&cert_der)
         .map_err(|e| Error::Verification(format!("failed to parse certificate: {}", e)))?;
 
     // Look for the SCT extension (OID 1.3.6.1.4.1.11129.2.4.2)
@@ -384,6 +390,9 @@ pub fn verify_sct(cert_der: &[u8], trusted_root: Option<&TrustedRoot>) -> Result
     // We must remove the SCT extension to reconstruct what the Log signed.
     let precert_tbs_der = create_precert_tbs(&cert, sct_extension)?;
 
+    // Get issuer key hash
+    let issuer_key_hash = get_issuer_key_hash(&cert_der, verification_material, trusted_root)?;
+
     // Parse the TLS-encoded SCT list manually (2-byte length + SCTs)
     if sct_list_bytes.len() < 2 {
         return Err(Error::Verification("SCT list too short".to_string()));
@@ -420,9 +429,18 @@ pub fn verify_sct(cert_der: &[u8], trusted_root: Option<&TrustedRoot>) -> Result
 
         // Try to verify this SCT against known CT logs
         for (log_id, public_key) in &ct_keys {
-            if verify_single_sct(sct_bytes, &precert_tbs_der, log_id, public_key).is_ok() {
-                verified_any = true;
-                break;
+            match verify_single_sct(sct_bytes, &precert_tbs_der, &issuer_key_hash, log_id, public_key) {
+                Ok(_) => {
+                    verified_any = true;
+                    println!("SCT verified successfully against log ID: {:x?}", log_id);
+                    break;
+                }
+                Err(e) => {
+                    println!("SCT verification failed against log ID {:x?}: {}", log_id, e);
+                     if !e.to_string().contains("SCT log ID mismatch") {
+                          println!("Failed to verify SCT against log {:x?}: {}", log_id, e);
+                     }
+                }
             }
         }
 
@@ -435,9 +453,9 @@ pub fn verify_sct(cert_der: &[u8], trusted_root: Option<&TrustedRoot>) -> Result
         // TODO: Make this error fatal once SCT verification is fully working
         // For now, log a warning but don't fail verification
         eprintln!("Warning: no valid SCT could be verified against trusted CT logs");
-        // return Err(Error::Verification(
-        //     "no valid SCT could be verified against trusted CT logs".to_string(),
-        // ));
+        return Err(Error::Verification(
+            "no valid SCT could be verified against trusted CT logs".to_string(),
+        ));
     }
 
     Ok(())
@@ -455,12 +473,17 @@ fn create_precert_tbs(
 
     // Filter out the SCT extension (OID 1.3.6.1.4.1.11129.2.4.2)
     if let Some(exts) = tbs.extensions.as_mut() {
+        let initial_len = exts.len();
         exts.retain(|ext| ext.extn_id != sct_ext_to_remove.extn_id);
 
         // Also remove the "Poison" extension if present (OID 1.3.6.1.4.1.11129.2.4.3)
         // This marks a precertificate, and the Log strips it before signing
         let poison_oid = const_oid::ObjectIdentifier::new_unwrap("1.3.6.1.4.1.11129.2.4.3");
         exts.retain(|ext| ext.extn_id != poison_oid);
+
+        if exts.is_empty() && initial_len > 0 {
+            tbs.extensions = None;
+        }
     }
 
     tbs.to_der()
@@ -473,6 +496,7 @@ fn create_precert_tbs(
 fn verify_single_sct(
     sct_bytes: &[u8],
     precert_tbs: &[u8],
+    issuer_key_hash: &[u8],
     expected_log_id: &[u8],
     public_key: &[u8],
 ) -> Result<()> {
@@ -551,6 +575,13 @@ fn verify_single_sct(
     // CRITICAL FIX: This must be 1 (PrecertEntry), not 0 (X509Entry)
     signed_data.extend_from_slice(&[0, 1]);
 
+    // PreCert structure:
+    // issuer_key_hash (32 bytes)
+    if issuer_key_hash.len() != 32 {
+         return Err(Error::Verification("issuer key hash must be 32 bytes".to_string()));
+    }
+    signed_data.extend_from_slice(issuer_key_hash);
+
     // PrecertEntry: 3-byte length prefix + TBS certificate (without SCT extension)
     let tbs_len = precert_tbs.len();
     signed_data.push(((tbs_len >> 16) & 0xFF) as u8);
@@ -580,8 +611,18 @@ fn verify_single_sct(
     };
 
     // Verify the SCT signature
-    verify_signature(public_key, &signed_data, signature, scheme)
-        .map_err(|e| Error::Verification(format!("SCT signature verification failed: {}", e)))
+    let result = verify_signature(public_key, &signed_data, signature, scheme)
+        .map_err(|e| Error::Verification(format!("SCT signature verification failed: {}", e)));
+    
+    if result.is_err() {
+        println!("SCT signature verification failed.");
+        println!("Log ID: {:x?}", log_id);
+        // println!("Signed Data (hex): {:x?}", signed_data);
+        // println!("Signature (hex): {:x?}", signature);
+        // println!("Public Key (hex): {:x?}", public_key);
+    }
+    
+    result
 }
 
 /// Verify that the certificate conforms to the Sigstore X.509 profile
@@ -643,6 +684,65 @@ pub fn verify_x509_profile(cert_der: &[u8]) -> Result<()> {
     Ok(())
 }
 
+/// Calculate the SPKI (Subject Public Key Info) hash for a certificate
+fn calculate_spki_hash(cert_der: &[u8]) -> Result<Vec<u8>> {
+    use x509_cert::der::{Decode, Encode};
+    use x509_cert::Certificate;
+    
+    let cert = Certificate::from_der(cert_der).map_err(|e| {
+        Error::Verification(format!("failed to parse certificate for SPKI hash: {}", e))
+    })?;
+    let spki_der = cert.tbs_certificate.subject_public_key_info.to_der().map_err(|e| {
+        Error::Verification(format!("failed to serialize SPKI: {}", e))
+    })?;
+    Ok(sigstore_crypto::sha256(&spki_der).to_vec())
+}
+
+/// Get the issuer key hash for SCT verification
+///
+/// This attempts to find the issuer's public key hash using the verification material
+/// and the trusted root.
+fn get_issuer_key_hash(
+    cert_der: &[u8],
+    verification_material: &VerificationMaterialContent,
+    trusted_root: Option<&TrustedRoot>
+) -> Result<Vec<u8>> {
+    use x509_cert::der::Decode;
+    use x509_cert::Certificate;
+
+    // 1. Try to get from chain in verification material
+    if let VerificationMaterialContent::X509CertificateChain { certificates } = verification_material {
+        if certificates.len() > 1 {
+            let issuer_der = certificates[1].raw_bytes.decode().map_err(|e| {
+                Error::Verification(format!("failed to decode issuer certificate: {}", e))
+            })?;
+            return calculate_spki_hash(&issuer_der);
+        }
+    }
+    
+    // 2. Try to find in trusted root
+    if let Some(root) = trusted_root {
+        let cert = Certificate::from_der(cert_der).map_err(|e| {
+            Error::Verification(format!("failed to parse certificate: {}", e))
+        })?;
+        let issuer_name = cert.tbs_certificate.issuer;
+        
+        let fulcio_certs = root.fulcio_certs().map_err(|e| {
+            Error::Verification(format!("failed to get Fulcio certs: {}", e))
+        })?;
+        
+        for ca_der in fulcio_certs {
+            if let Ok(ca_cert) = Certificate::from_der(&ca_der) {
+                if ca_cert.tbs_certificate.subject == issuer_name {
+                    return calculate_spki_hash(&ca_der);
+                }
+            }
+        }
+    }
+    
+    Err(Error::Verification("could not find issuer certificate for SCT verification".to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -650,6 +750,7 @@ mod tests {
 
     #[test]
     fn test_verify_sct_with_conformance_data() {
+        use x509_cert::der::{Decode, Encode, Header, Reader, SliceReader};
         // Certificate from sigstore-conformance/test/assets/bundle-verify/happy-path/bundle.sigstore.json
         // This certificate contains an embedded SCT
         let cert_base64 = "MIIIGTCCB5+gAwIBAgIUBPWs4OPN1kte0mUMGZrZ6ozMVRkwCgYIKoZIzj0EAwMwNzEVMBMGA1UEChMMc2lnc3RvcmUuZGV2MR4wHAYDVQQDExVzaWdzdG9yZS1pbnRlcm1lZGlhdGUwHhcNMjMwNzEyMTU1NjM1WhcNMjMwNzEyMTYwNjM1WjAAMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEVr33uVAPA1SpA5w/mmBF9ariW8E7oizIQKqiYfxwSb1zftqZZX045y3tPbRkIWe+t7MUYliQknQ954rDDEASnKOCBr4wgga6MA4GA1UdDwEB/wQEAwIHgDATBgNVHSUEDDAKBggrBgEFBQcDAzAdBgNVHQ4EFgQUx2TNZkruHC2aCdyIXscI8N/8q2owHwYDVR0jBBgwFoAU39Ppz1YkEZb5qNjpKFWixi4YZD8wgaUGA1UdEQEB/wSBmjCBl4aBlGh0dHBzOi8vZ2l0aHViLmNvbS9zaWdzdG9yZS1jb25mb3JtYW5jZS9leHRyZW1lbHktZGFuZ2Vyb3VzLXB1YmxpYy1vaWRjLWJlYWNvbi8uZ2l0aHViL3dvcmtmbG93cy9leHRyZW1lbHktZGFuZ2Vyb3VzLW9pZGMtYmVhY29uLnltbEByZWZzL2hlYWRzL21haW4wOQYKKwYBBAGDvzABAQQraHR0cHM6Ly90b2tlbi5hY3Rpb25zLmdpdGh1YnVzZXJjb250ZW50LmNvbTAfBgorBgEEAYO/MAECBBF3b3JrZmxvd19kaXNwYXRjaDA2BgorBgEEAYO/MAEDBChhZjc4NWI2ZDNiMGZhMGMwYWExMzA1ZmFlZTdjZTYwMzZlOGQ5MGM0MC0GCisGAQQBg78wAQQEH0V4dHJlbWVseSBkYW5nZXJvdXMgT0lEQyBiZWFjb24wSQYKKwYBBAGDvzABBQQ7c2lnc3RvcmUtY29uZm9ybWFuY2UvZXh0cmVtZWx5LWRhbmdlcm91cy1wdWJsaWMtb2lkYy1iZWFjb24wHQYKKwYBBAGDvzABBgQPcmVmcy9oZWFkcy9tYWluMDsGCisGAQQBg78wAQgELQwraHR0cHM6Ly90b2tlbi5hY3Rpb25zLmdpdGh1YnVzZXJjb250ZW50LmNvbTCBpgYKKwYBBAGDvzABCQSBlwyBlGh0dHBzOi8vZ2l0aHViLmNvbS9zaWdzdG9yZS1jb25mb3JtYW5jZS9leHRyZW1lbHktZGFuZ2Vyb3VzLXB1YmxpYy1vaWRjLWJlYWNvbi8uZ2l0aHViL3dvcmtmbG93cy9leHRyZW1lbHktZGFuZ2Vyb3VzLW9pZGMtYmVhY29uLnltbEByZWZzL2hlYWRzL21haW4wOAYKKwYBBAGDvzABCgQqDChhZjc4NWI2ZDNiMGZhMGMwYWExMzA1ZmFlZTdjZTYwMzZlOGQ5MGM0MB0GCisGAQQBg78wAQsEDwwNZ2l0aHViLWhvc3RlZDBeBgorBgEEAYO/MAEMBFAMTmh0dHBzOi8vZ2l0aHViLmNvbS9zaWdzdG9yZS1jb25mb3JtYW5jZS9leHRyZW1lbHktZGFuZ2Vyb3VzLXB1YmxpYy1vaWRjLWJlYWNvbjA4BgorBgEEAYO/MAENBCoMKGFmNzg1YjZkM2IwZmEwYzBhYTEzMDVmYWVlN2NlNjAzNmU4ZDkwYzQwHwYKKwYBBAGDvzABDgQRDA9yZWZzL2hlYWRzL21haW4wGQYKKwYBBAGDvzABDwQLDAk2MzI1OTY4OTcwNwYKKwYBBAGDvzABEAQpDCdodHRwczovL2dpdGh1Yi5jb20vc2lnc3RvcmUtY29uZm9ybWFuY2UwGQYKKwYBBAGDvzABEQQLDAkxMzE4MDQ1NjMwgaYGCisGAQQBg78wARIEgZcMgZRodHRwczovL2dpdGh1Yi5jb20vc2lnc3RvcmUtY29uZm9ybWFuY2UvZXh0cmVtZWx5LWRhbmdlcm91cy1wdWJsaWMtb2lkYy1iZWFjb24vLmdpdGh1Yi93b3JrZmxvd3MvZXh0cmVtZWx5LWRhbmdlcm91cy1vaWRjLWJlYWNvbi55bWxAcmVmcy9oZWFkcy9tYWluMDgGCisGAQQBg78wARMEKgwoYWY3ODViNmQzYjBmYTBjMGFhMTMwNWZhZWU3Y2U2MDM2ZThkOTBjNDAhBgorBgEEAYO/MAEUBBMMEXdvcmtmbG93X2Rpc3BhdGNoMIGBBgorBgEEAYO/MAEVBHMMcWh0dHBzOi8vZ2l0aHViLmNvbS9zaWdzdG9yZS1jb25mb3JtYW5jZS9leHRyZW1lbHktZGFuZ2Vyb3VzLXB1YmxpYy1vaWRjLWJlYWNvbi9hY3Rpb25zL3J1bnMvNTUzMzc0MTQ5Ny9hdHRlbXB0cy8xMIGKBgorBgEEAdZ5AgQCBHwEegB4AHYA3T0wasbHETJjGR4cmWc3AqJKXrjePK3/h4pygC8p7o4AAAGJStGTCwAABAMARzBFAiBCA4jZQP4CwMiWoeS7WMW46QkI4e7OsNH3yVhf5wdBvgIhAPJYxdsi9NqOXVZsEUtCup8m1m/2zG39FTGlgE0MorDFMAoGCCqGSM49BAMDA2gAMGUCMEYWRwI5QJeOwNCuV4tnZ0n5QNlUlP0BtX5V2ZTQLqcQbWtneC7tLptiYgr0Z62UDQIxAO6ItXAH+sbZcsbj08xr3GApM6hjvyTAl39pS3Y3sZwAz8lfQDHNL4eALEo1heAYVg==";
@@ -657,22 +758,94 @@ mod tests {
         use base64::Engine;
         let cert_der = base64::engine::general_purpose::STANDARD.decode(cert_base64).expect("failed to decode cert");
 
+        // --- Round-trip check ---
+        let cert = x509_cert::Certificate::from_der(&cert_der).unwrap();
+        let re_encoded_tbs = cert.tbs_certificate.to_der().unwrap();
+        
+        let mut reader = SliceReader::new(&cert_der).unwrap();
+        let outer_header = Header::decode(&mut reader).unwrap();
+        let outer_body = reader.read_slice(outer_header.length).unwrap();
+        
+        // Now decode TBS header from outer_body
+        let mut tbs_reader = SliceReader::new(outer_body).unwrap();
+        let tbs_header = Header::decode(&mut tbs_reader).unwrap();
+        let tbs_total_len = (tbs_header.encoded_len().unwrap() + tbs_header.length).unwrap();
+        let tbs_total_len_usize: usize = tbs_total_len.try_into().unwrap();
+        
+        let original_tbs = &outer_body[..tbs_total_len_usize];
+        
+        if original_tbs != re_encoded_tbs {
+            println!("TBS round-trip FAILED!");
+            println!("Original len: {}", original_tbs.len());
+            println!("Re-encoded len: {}", re_encoded_tbs.len());
+            
+            // Find first difference
+            for (i, (a, b)) in original_tbs.iter().zip(re_encoded_tbs.iter()).enumerate() {
+                if a != b {
+                    println!("Difference at offset {}: original {:02x}, re-encoded {:02x}", i, a, b);
+                    break;
+                }
+            }
+        } else {
+            println!("TBS round-trip SUCCEEDED!");
+        }
+        // ------------------------
+
         // Construct a trusted root with the CT log key that signed the SCT
-        // Key ID: wNI9atQGlz+VWfO6LRygH4QUfY/8W4RFwiT5i5WRgB0=
-        // Public Key: MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2G2Y+2tabdTV5BcGiBIx0a9fAFwrkBbmLSGtks4L3qX6yYY0zufBnhC8Ur/iy55GhWP/9A/bY2LhC30M9+RYtw==
+        // Key ID: 3T0wasbHETJjGR4cmWc3AqJKXrjePK3/h4pygC8p7o=
+        // Public Key: MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEiPSlFi0CmFTfEjCUqF9HuCEcYXNKAaYalIJmBZ8yyezPjTqhxrKBpMnaocVtLJBI1eM3uXnQzQGAJdJ4gs9Fyw==
         let trusted_root_json = r#"{
             "mediaType": "application/vnd.dev.sigstore.trustedroot+json;version=0.1",
             "tlogs": [],
-            "certificateAuthorities": [],
+            "certificateAuthorities": [
+                {
+                  "subject": {
+                    "organization": "sigstore.dev",
+                    "commonName": "sigstore"
+                  },
+                  "uri": "https://fulcio.sigstore.dev",
+                  "certChain": {
+                    "certificates": [
+                      {
+                        "rawBytes": "MIIB+DCCAX6gAwIBAgITNVkDZoCiofPDsy7dfm6geLbuhzAKBggqhkjOPQQDAzAqMRUwEwYDVQQKEwxzaWdzdG9yZS5kZXYxETAPBgNVBAMTCHNpZ3N0b3JlMB4XDTIxMDMwNzAzMjAyOVoXDTMxMDIyMzAzMjAyOVowKjEVMBMGA1UEChMMc2lnc3RvcmUuZGV2MREwDwYDVQQDEwhzaWdzdG9yZTB2MBAGByqGSM49AgEGBSuBBAAiA2IABLSyA7Ii5k+pNO8ZEWY0ylemWDowOkNa3kL+GZE5Z5GWehL9/A9bRNA3RbrsZ5i0JcastaRL7Sp5fp/jD5dxqc/UdTVnlvS16an+2Yfswe/QuLolRUCrcOE2+2iA5+tzd6NmMGQwDgYDVR0PAQH/BAQDAgEGMBIGA1UdEwEB/wQIMAYBAf8CAQEwHQYDVR0OBBYEFMjFHQBBmiQpMlEk6w2uSu1KBtPsMB8GA1UdIwQYMBaAFMjFHQBBmiQpMlEk6w2uSu1KBtPsMAoGCCqGSM49BAMDA2gAMGUCMH8liWJfMui6vXXBhjDgY4MwslmN/TJxVe/83WrFomwmNf056y1X48F9c4m3a3ozXAIxAKjRay5/aj/jsKKGIkmQatjI8uupHr/+CxFvaJWmpYqNkLDGRU+9orzh5hI2RrcuaQ=="
+                      }
+                    ]
+                  },
+                  "validFor": {
+                    "start": "2021-03-07T03:20:29.000Z",
+                    "end": "2022-12-31T23:59:59.999Z"
+                  }
+                },
+                {
+                  "subject": {
+                    "organization": "sigstore.dev",
+                    "commonName": "sigstore"
+                  },
+                  "uri": "https://fulcio.sigstore.dev",
+                  "certChain": {
+                    "certificates": [
+                      {
+                        "rawBytes": "MIICGjCCAaGgAwIBAgIUALnViVfnU0brJasmRkHrn/UnfaQwCgYIKoZIzj0EAwMwKjEVMBMGA1UEChMMc2lnc3RvcmUuZGV2MREwDwYDVQQDEwhzaWdzdG9yZTAeFw0yMjA0MTMyMDA2MTVaFw0zMTEwMDUxMzU2NThaMDcxFTATBgNVBAoTDHNpZ3N0b3JlLmRldjEeMBwGA1UEAxMVc2lnc3RvcmUtaW50ZXJtZWRpYXRlMHYwEAYHKoZIzj0CAQYFK4EEACIDYgAE8RVS/ysH+NOvuDZyPIZtilgUF9NlarYpAd9HP1vBBH1U5CV77LSS7s0ZiH4nE7Hv7ptS6LvvR/STk798LVgMzLlJ4HeIfF3tHSaexLcYpSASr1kS0N/RgBJz/9jWCiXno3sweTAOBgNVHQ8BAf8EBAMCAQYwEwYDVR0lBAwwCgYIKwYBBQUHAwMwEgYDVR0TAQH/BAgwBgEB/wIBADAdBgNVHQ4EFgQU39Ppz1YkEZb5qNjpKFWixi4YZD8wHwYDVR0jBBgwFoAUWMAeX5FFpWapesyQoZMi0CrFxfowCgYIKoZIzj0EAwMDZwAwZAIwPCsQK4DYiZYDPIaDi5HFKnfxXx6ASSVmERfsynYBiX2X6SJRnZU84/9DZdnFvvxmAjBOt6QpBlc4J/0DxvkTCqpclvziL6BCCPnjdlIB3Pu3BxsPmygUY7Ii2zbdCdliiow="
+                      },
+                      {
+                        "rawBytes": "MIIB9zCCAXygAwIBAgIUALZNAPFdxHPwjeDloDwyYChAO/4wCgYIKoZIzj0EAwMwKjEVMBMGA1UEChMMc2lnc3RvcmUuZGV2MREwDwYDVQQDEwhzaWdzdG9yZTAeFw0yMTEwMDcxMzU2NTlaFw0zMTEwMDUxMzU2NThaMCoxFTATBgNVBAoTDHNpZ3N0b3JlLmRldjERMA8GA1UEAxMIc2lnc3RvcmUwdjAQBgcqhkjOPQIBBgUrgQQAIgNiAAT7XeFT4rb3PQGwS4IajtLk3/OlnpgangaBclYpsYBr5i+4ynB07ceb3LP0OIOZdxexX69c5iVuyJRQ+Hz05yi+UF3uBWAlHpiS5sh0+H2GHE7SXrk1EC5m1Tr19L9gg92jYzBhMA4GA1UdDwEB/wQEAwIBBjAPBgNVHRMBAf8EBTADAQH/MB0GA1UdDgQWBBRYwB5fkUWlZql6zJChkyLQKsXF+jAfBgNVHSMEGDAWgBRYwB5fkUWlZql6zJChkyLQKsXF+jAKBggqhkjOPQQDAwNpADBmAjEAj1nHeXZp+13NWBNa+EDsDP8G1WWg1tCMWP/WHPqpaVo0jhsweNFZgSs0eE7wYI4qAjEA2WB9ot98sIkoF3vZYdd3/VtWB5b9TNMea7Ix/stJ5TfcLLeABLE4BNJOsQ4vnBHJ"
+                      }
+                    ]
+                  },
+                  "validFor": {
+                    "start": "2022-04-13T20:06:15.000Z"
+                  }
+                }
+            ],
             "ctlogs": [{
-                "baseUrl": "https://rekor.sigstore.dev",
+                "baseUrl": "https://ctfe.sigstore.dev/2022",
                 "hashAlgorithm": "SHA2_256",
                 "publicKey": {
-                    "rawBytes": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE2G2Y+2tabdTV5BcGiBIx0a9fAFwrkBbmLSGtks4L3qX6yYY0zufBnhC8Ur/iy55GhWP/9A/bY2LhC30M9+RYtw==",
+                    "rawBytes": "MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEiPSlFi0CmFTfEjCUqF9HuCEcYXNKAaYalIJmBZ8yyezPjTqhxrKBpMnaocVtLJBI1eM3uXnQzQGAJdJ4gs9Fyw==",
                     "keyDetails": "PKIX_ECDSA_P256_SHA_256"
                 },
                 "logId": {
-                    "keyId": "wNI9atQGlz+VWfO6LRygH4QUfY/8W4RFwiT5i5WRgB0="
+                    "keyId": "3T0wasbHETJjGR4cmWc3AqJKXrjePK3/h4pygC8p7o4="
                 }
             }],
             "timestampAuthorities": []
@@ -681,7 +854,31 @@ mod tests {
         let trusted_root = TrustedRoot::from_json(trusted_root_json).expect("failed to parse trusted root");
 
         // Verify the SCT
-        let result = verify_sct(&cert_der, Some(&trusted_root));
+        use sigstore_types::bundle::CertificateContent;
+        let content = VerificationMaterialContent::Certificate(CertificateContent {
+            raw_bytes: cert_base64.to_string().into(),
+        });
+        let result = verify_sct(&content, Some(&trusted_root));
         assert!(result.is_ok(), "SCT verification failed: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_verify_sct_invalid_key() {
+        let trusted_root_json = include_str!("../../test_data/invalid-ct-key_fail/trusted_root.json");
+        let bundle_json = include_str!("../../test_data/invalid-ct-key_fail/bundle.sigstore.json");
+
+        let trusted_root = TrustedRoot::from_json(trusted_root_json).unwrap();
+        let bundle: Bundle = serde_json::from_str(bundle_json).unwrap();
+
+        // This should fail because the SCT key ID is not in the trusted root
+        let result = verify_sct(&bundle.verification_material.content, Some(&trusted_root));
+        assert!(result.is_err());
+        
+        // Also verify that the certificate chain verification succeeds (since the chain itself is valid)
+        let cert_der = extract_certificate_der(&bundle.verification_material.content).unwrap();
+        // Use a time within the certificate validity period (2023-07-12 15:56:35 UTC to 2023-07-12 16:06:35 UTC)
+        let valid_time = 1689177500; 
+        let result_chain = verify_certificate_chain(&cert_der, valid_time, Some(&trusted_root));
+        assert!(result_chain.is_ok(), "Chain verification failed: {:?}", result_chain.err());
     }
 }
