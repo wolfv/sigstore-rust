@@ -277,8 +277,36 @@ pub fn verify_certificate_chain(
 
             // Check if the EE certificate's issuer matches this Fulcio cert's subject
             if ee_issuer == fulcio_subject {
-                found_issuer = true;
-                break;
+                // Verify the signature
+                let tbs_der = match ee_cert.tbs_certificate.to_der() {
+                    Ok(der) => der,
+                    Err(_) => continue,
+                };
+
+                let Some(signature) = ee_cert.signature.as_bytes() else {
+                    continue;
+                };
+
+                let sig_alg_oid = ee_cert.signature_algorithm.oid;
+                let scheme = if sig_alg_oid == const_oid::ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.2") {
+                    // ecdsa-with-SHA256
+                    sigstore_crypto::SigningScheme::EcdsaP256Sha256
+                } else if sig_alg_oid == const_oid::ObjectIdentifier::new_unwrap("1.2.840.10045.4.3.3") {
+                    // ecdsa-with-SHA384
+                    sigstore_crypto::SigningScheme::EcdsaP384Sha384
+                } else {
+                    continue;
+                };
+
+                let issuer_spki = &fulcio_cert.tbs_certificate.subject_public_key_info;
+                let Some(issuer_pub_key) = issuer_spki.subject_public_key.as_bytes() else {
+                    continue;
+                };
+
+                if sigstore_crypto::verify_signature(issuer_pub_key, &tbs_der, signature, scheme).is_ok() {
+                    found_issuer = true;
+                    break;
+                }
             }
         }
     }
@@ -289,16 +317,9 @@ pub fn verify_certificate_chain(
         ));
     }
 
-    // TODO: Implement full cryptographic chain verification using webpki
-    // For now, we verify that:
-    // 1. The certificate's issuer matches a Fulcio root's subject (checked above)
-    // 2. The certificate validity is checked in validate_certificate_time()
-    // 3. The certificate signature is implicitly trusted through the transparency log
-    //
-    // Full verification would additionally check:
-    // - Cryptographic signature on the certificate by the issuer
-    // - Certificate chain path validation
-    // - Name constraints and other X.509 extensions
+    // Verify certificate validity period
+    let cert_info = sigstore_crypto::parse_certificate_info(cert_der)?;
+    validate_certificate_time(_validation_time, &cert_info)?;
 
     Ok(())
 }
