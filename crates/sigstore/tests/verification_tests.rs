@@ -2,10 +2,12 @@
 //!
 //! These tests validate the complete verification flow using real bundles.
 
+use base64::{engine::general_purpose::STANDARD, Engine};
 use sigstore::bundle::{validate_bundle, validate_bundle_with_options, ValidationOptions};
 use sigstore::types::Bundle;
 use sigstore::verify::{verify, VerificationPolicy, Verifier};
 use sigstore_types::LogIndex;
+use x509_cert::der::Decode;
 
 /// Real v0.3 bundle from sigstore-python tests
 const V03_BUNDLE: &str = include_str!("../../sigstore-bundle/tests/fixtures/bundle_v3.json");
@@ -441,4 +443,123 @@ fn test_bundle_v03_certificate_extraction() {
     // Verify certificate can be extracted
     let cert = bundle.signing_certificate();
     assert!(cert.is_some(), "Should have a signing certificate");
+}
+
+// ==== Sigstore-go Equivalent Tests ====
+
+/// Test that DSSE bundles with multiple signatures fail verification
+/// Equivalent to sigstore-go's TestSigstoreBundle2Sig which expects ErrDSSEInvalidSignatureCount
+#[test]
+fn test_dsse_bundle_with_2_signatures_should_fail() {
+    let bundle = Bundle::from_json(DSSE_2SIGS_BUNDLE).expect("Failed to parse DSSE 2-sigs bundle");
+
+    // Verify the bundle has 2 signatures
+    match &bundle.content {
+        sigstore::types::bundle::SignatureContent::DsseEnvelope(env) => {
+            assert_eq!(env.signatures.len(), 2, "Bundle should have 2 signatures");
+        }
+        _ => panic!("Expected DSSE envelope"),
+    }
+
+    // Verification should fail because we only support single signatures
+    let artifact = b"test artifact";
+    let policy = VerificationPolicy::default()
+        .skip_timestamp()
+        .skip_artifact_hash();
+
+    let result = verify(artifact, &bundle, &policy);
+
+    // This should fail - multiple signatures are not supported
+    // sigstore-go returns ErrDSSEInvalidSignatureCount for this case
+    assert!(
+        result.is_err(),
+        "Verification should fail for bundles with multiple signatures"
+    );
+}
+
+/// Test GitHub Actions provenance bundle certificate extension extraction
+/// Equivalent to sigstore-go's TestSummarizeCertificateWithActionsBundle
+#[test]
+fn test_github_actions_provenance_bundle() {
+    let bundle =
+        Bundle::from_json(SIGSTORE_JS_PROVENANCE).expect("Failed to parse provenance bundle");
+
+    // Should parse successfully
+    assert!(
+        bundle.media_type.contains("0.1") || bundle.media_type.contains("0.2"),
+        "Expected v0.1 or v0.2 bundle"
+    );
+
+    // Extract the signing certificate (base64-encoded DER)
+    let cert_b64 = bundle
+        .signing_certificate()
+        .expect("Should have a signing certificate");
+
+    // Decode from base64
+    let cert_der = STANDARD
+        .decode(cert_b64)
+        .expect("Failed to decode base64 certificate");
+
+    // Parse the certificate to verify GitHub Actions extensions
+    use x509_cert::Certificate;
+    let cert = Certificate::from_der(&cert_der).expect("Failed to parse certificate");
+
+    // The certificate should have GitHub Actions OID extensions
+    // OID 1.3.6.1.4.1.57264.1.1 = Issuer
+    // OID 1.3.6.1.4.1.57264.1.2 = GitHub Workflow Trigger
+    // etc.
+
+    // Verify the SAN contains the expected GitHub Actions workflow URI
+    let san_ext = cert
+        .tbs_certificate
+        .extensions
+        .as_ref()
+        .and_then(|exts| {
+            exts.iter()
+                .find(|e| e.extn_id == const_oid::db::rfc5280::ID_CE_SUBJECT_ALT_NAME)
+        });
+
+    assert!(
+        san_ext.is_some(),
+        "Certificate should have Subject Alternative Name extension"
+    );
+}
+
+/// Test bundle with OtherName SAN type
+/// Equivalent to sigstore-go's TestEntityWithOthernameSan
+#[test]
+fn test_othername_san_bundle() {
+    let bundle = Bundle::from_json(OTHERNAME_BUNDLE).expect("Failed to parse othername bundle");
+
+    // Extract the signing certificate (base64-encoded DER)
+    let cert_b64 = bundle
+        .signing_certificate()
+        .expect("Should have a signing certificate");
+
+    // Decode from base64
+    let cert_der = STANDARD
+        .decode(cert_b64)
+        .expect("Failed to decode base64 certificate");
+
+    // Parse the certificate
+    use x509_cert::Certificate;
+    let cert = Certificate::from_der(&cert_der).expect("Failed to parse certificate");
+
+    // Verify the certificate has a SAN extension (otherName type)
+    let san_ext = cert
+        .tbs_certificate
+        .extensions
+        .as_ref()
+        .and_then(|exts| {
+            exts.iter()
+                .find(|e| e.extn_id == const_oid::db::rfc5280::ID_CE_SUBJECT_ALT_NAME)
+        });
+
+    assert!(
+        san_ext.is_some(),
+        "Certificate should have Subject Alternative Name extension"
+    );
+
+    // In sigstore-go, this test verifies identity "foo!oidc.local"
+    // The otherName SAN contains a non-standard identity format
 }

@@ -11,8 +11,18 @@ use crate::encoding::{
 };
 use crate::error::{Error, Result};
 use crate::hash::HashAlgorithm;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize};
 use std::str::FromStr;
+
+/// Deserialize a field that may be null as the default value
+fn deserialize_null_as_default<'de, D, T>(deserializer: D) -> std::result::Result<T, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    let opt = Option::deserialize(deserializer)?;
+    Ok(opt.unwrap_or_default())
+}
 
 /// Sigstore bundle media types
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -169,7 +179,7 @@ pub struct VerificationMaterial {
     #[serde(default)]
     pub tlog_entries: Vec<TransparencyLogEntry>,
     /// RFC 3161 timestamp verification data
-    #[serde(default)]
+    #[serde(default, deserialize_with = "deserialize_null_as_default")]
     pub timestamp_verification_data: TimestampVerificationData,
 }
 
