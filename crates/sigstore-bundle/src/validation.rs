@@ -155,14 +155,14 @@ fn validate_inclusion_proofs(bundle: &Bundle) -> Result<()> {
             let expected_root = checkpoint.root_hash;
 
             // Hash the leaf
-            let leaf_hash = sigstore_merkle::hash_leaf(&leaf_data);
+            let leaf_hash = sigstore_merkle::hash_leaf(leaf_data);
 
             // Verify the inclusion proof
             verify_inclusion_proof(
                 &leaf_hash,
                 leaf_index,
                 tree_size,
-                &proof_hashes,
+                proof_hashes,
                 &expected_root,
             )
             .map_err(|e| {

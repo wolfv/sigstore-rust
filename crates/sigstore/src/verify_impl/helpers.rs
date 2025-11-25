@@ -131,7 +131,7 @@ pub fn extract_tsa_timestamp(
 
             // Verify the timestamp response with full cryptographic validation
             let result =
-                verify_timestamp_response(&ts_bytes, signature_bytes, opts).map_err(|e| {
+                verify_timestamp_response(ts_bytes, signature_bytes, opts).map_err(|e| {
                     Error::Verification(format!("TSA timestamp verification failed: {}", e))
                 })?;
 
@@ -147,7 +147,7 @@ pub fn extract_tsa_timestamp(
             }
         } else {
             // No trusted root - fall back to just parsing (old behavior)
-            match parse_timestamp(&ts_bytes) {
+            match parse_timestamp(ts_bytes) {
                 Ok(timestamp) => {
                     if let Some(earliest) = earliest_timestamp {
                         if timestamp < earliest {
@@ -467,7 +467,7 @@ fn get_issuer_spki(
     {
         if certificates.len() > 1 {
             let issuer_der = certificates[1].raw_bytes.as_bytes();
-            let issuer_cert = Certificate::from_der(&issuer_der).map_err(|e| {
+            let issuer_cert = Certificate::from_der(issuer_der).map_err(|e| {
                 Error::Verification(format!("failed to parse issuer certificate: {}", e))
             })?;
             return issuer_cert

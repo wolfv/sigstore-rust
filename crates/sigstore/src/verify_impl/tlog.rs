@@ -195,7 +195,7 @@ pub fn verify_set(entry: &TransparencyLogEntry, trusted_root: &TrustedRoot) -> R
     verify_signature(
         &log_key_bytes,
         &canonical_json,
-        &signature,
+        signature,
         SigningScheme::EcdsaP256Sha256,
     )
     .map_err(|e| Error::Verification(format!("SET verification failed: {}", e)))?;

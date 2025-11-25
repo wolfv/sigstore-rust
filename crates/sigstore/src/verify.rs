@@ -304,7 +304,7 @@ impl Verifier {
                 if sigstore_crypto::verify_signature(
                     &cert_info.public_key_bytes,
                     &pae,
-                    &sig_bytes,
+                    sig_bytes,
                     cert_info.signing_scheme,
                 )
                 .is_ok()
@@ -332,7 +332,7 @@ impl Verifier {
                     Error::Verification(format!("payload is not valid UTF-8: {}", e))
                 })?;
 
-                let statement: Statement = serde_json::from_str(&payload_str).map_err(|e| {
+                let statement: Statement = serde_json::from_str(payload_str).map_err(|e| {
                     Error::Verification(format!("failed to parse in-toto statement: {}", e))
                 })?;
 

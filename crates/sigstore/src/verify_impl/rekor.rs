@@ -65,7 +65,7 @@ fn verify_dsse_v001(
 
     // Verify payload hash (v0.0.1 uses hex encoding)
     let payload_bytes = envelope.payload.as_bytes();
-    let payload_hash = sigstore_crypto::sha256(&payload_bytes);
+    let payload_hash = sigstore_crypto::sha256(payload_bytes);
     let payload_hash_hex = hex::encode(payload_hash);
 
     if &payload_hash_hex != expected_hash {
@@ -161,7 +161,7 @@ fn verify_dsse_v002(
     if payload_hash.as_slice() != expected_hash.as_slice() {
         return Err(Error::Verification(format!(
             "DSSE payload hash mismatch: computed {}, expected {}",
-            hex::encode(&payload_hash),
+            hex::encode(payload_hash),
             hex::encode(expected_hash)
         )));
     }
