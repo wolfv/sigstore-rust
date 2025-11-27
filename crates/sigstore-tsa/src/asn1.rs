@@ -110,17 +110,21 @@ impl From<HashAlgorithm> for AlgorithmIdentifier {
     }
 }
 
-/// Message imprint containing hash algorithm and hashed message
+/// Message imprint containing hash algorithm and hashed message (ASN.1/DER format).
+///
 /// RFC 3161 Section 2.4.1
+///
+/// Note: This is different from `sigstore_types::MessageImprint` which is the
+/// JSON/serde representation used in bundles.
 #[derive(Clone, Debug, Eq, PartialEq, Sequence)]
-pub struct MessageImprint {
+pub struct Asn1MessageImprint {
     /// Hash algorithm used
     pub hash_algorithm: AlgorithmIdentifier,
     /// Hashed message
     pub hashed_message: OctetString,
 }
 
-impl MessageImprint {
+impl Asn1MessageImprint {
     /// Create a new message imprint
     pub fn new(algorithm: AlgorithmIdentifier, digest: Vec<u8>) -> Self {
         Self {
@@ -137,7 +141,7 @@ pub struct TimeStampReq {
     /// Version (must be 1)
     pub version: u8,
     /// Message imprint to be timestamped
-    pub message_imprint: MessageImprint,
+    pub message_imprint: Asn1MessageImprint,
     /// Optional policy OID
     #[asn1(optional = "true")]
     pub req_policy: Option<ObjectIdentifier>,
@@ -156,7 +160,7 @@ fn default_false() -> bool {
 
 impl TimeStampReq {
     /// Create a new timestamp request with an automatically generated nonce
-    pub fn new(message_imprint: MessageImprint) -> Self {
+    pub fn new(message_imprint: Asn1MessageImprint) -> Self {
         // Generate a random nonce for replay protection
         let nonce_bytes = generate_positive_nonce_bytes();
         let nonce = Int::new(&nonce_bytes).expect("valid nonce");
@@ -171,7 +175,7 @@ impl TimeStampReq {
     }
 
     /// Create a new timestamp request without a nonce (not recommended)
-    pub fn new_without_nonce(message_imprint: MessageImprint) -> Self {
+    pub fn new_without_nonce(message_imprint: Asn1MessageImprint) -> Self {
         Self {
             version: 1,
             message_imprint,
@@ -281,7 +285,7 @@ pub struct TstInfo {
     /// Policy OID
     pub policy: ObjectIdentifier,
     /// Message imprint
-    pub message_imprint: MessageImprint,
+    pub message_imprint: Asn1MessageImprint,
     /// Serial number
     pub serial_number: Int,
     /// Generation time
@@ -340,7 +344,7 @@ mod tests {
     #[test]
     fn test_message_imprint_encode() {
         let digest = vec![0u8; 32]; // SHA-256 produces 32 bytes
-        let imprint = MessageImprint::new(AlgorithmIdentifier::sha256(), digest);
+        let imprint = Asn1MessageImprint::new(AlgorithmIdentifier::sha256(), digest);
         let der = Encode::to_der(&imprint).unwrap();
         assert!(!der.is_empty());
     }
@@ -348,7 +352,7 @@ mod tests {
     #[test]
     fn test_timestamp_req_encode() {
         let digest = vec![0u8; 32];
-        let imprint = MessageImprint::new(AlgorithmIdentifier::sha256(), digest);
+        let imprint = Asn1MessageImprint::new(AlgorithmIdentifier::sha256(), digest);
         let req = TimeStampReq::new(imprint);
         let der = req.to_der().unwrap();
         assert!(!der.is_empty());
@@ -357,7 +361,7 @@ mod tests {
     #[test]
     fn test_timestamp_req_has_nonce() {
         let digest = vec![0u8; 32];
-        let imprint = MessageImprint::new(AlgorithmIdentifier::sha256(), digest);
+        let imprint = Asn1MessageImprint::new(AlgorithmIdentifier::sha256(), digest);
         let req = TimeStampReq::new(imprint);
 
         // Verify that the request has a nonce

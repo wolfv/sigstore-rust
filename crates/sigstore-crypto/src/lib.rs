@@ -14,7 +14,7 @@ pub mod x509;
 
 pub use checkpoint::{
     compute_key_hint, detect_key_type, extract_raw_key, verify_ecdsa_p256, verify_ed25519,
-    verify_signature_auto, KeyType, LogCheckpoint, NoteSignature, SignedNote,
+    verify_signature_auto, Checkpoint, CheckpointSignature, CheckpointVerifyExt, KeyType,
 };
 pub use encoding::{CertificateDer, DerBytes, KeyHint, PublicKeySpki, SignatureBytes};
 pub use error::{Error, Result};

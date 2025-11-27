@@ -1,6 +1,6 @@
 //! TSA client for RFC 3161 Time-Stamp Protocol
 
-use crate::asn1::{AlgorithmIdentifier, MessageImprint, TimeStampReq, TimeStampResp};
+use crate::asn1::{AlgorithmIdentifier, Asn1MessageImprint, TimeStampReq, TimeStampResp};
 use crate::error::{Error, Result};
 
 /// A client for interacting with a Time-Stamp Authority
@@ -44,7 +44,7 @@ impl TimestampClient {
         algorithm: AlgorithmIdentifier,
     ) -> Result<Vec<u8>> {
         // Build the timestamp request
-        let imprint = MessageImprint::new(algorithm, digest.to_vec());
+        let imprint = Asn1MessageImprint::new(algorithm, digest.to_vec());
         let request = TimeStampReq::new(imprint);
 
         // Encode to DER

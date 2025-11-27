@@ -189,7 +189,7 @@ impl RekorClient {
         let verification = Some(crate::entry::Verification {
             inclusion_proof: entry_v2
                 .inclusion_proof
-                .map(|p| crate::entry::InclusionProof {
+                .map(|p| crate::entry::RekorInclusionProof {
                     checkpoint: p.checkpoint.envelope,
                     // Convert Sha256Hash to hex strings (V1 format)
                     hashes: p.hashes.iter().map(|h| h.to_hex()).collect(),

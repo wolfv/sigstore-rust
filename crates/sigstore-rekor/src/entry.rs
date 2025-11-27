@@ -36,17 +36,20 @@ pub struct LogEntry {
 pub struct Verification {
     /// Inclusion proof
     #[serde(default)]
-    pub inclusion_proof: Option<InclusionProof>,
+    pub inclusion_proof: Option<RekorInclusionProof>,
     /// Signed entry timestamp (SET)
     #[serde(default)]
     pub signed_entry_timestamp: Option<SignedTimestamp>,
 }
 
-/// Inclusion proof for a log entry (V1 API - uses i64 for indices)
-/// Note: V1 API returns hashes as hex strings, not base64
+/// Inclusion proof from Rekor V1 API.
+///
+/// Note: This is different from `sigstore_types::InclusionProof` which is the
+/// bundle format with typed fields. This uses raw strings as returned by the
+/// Rekor V1 API (hex-encoded hashes, i64 indices).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct InclusionProof {
+pub struct RekorInclusionProof {
     /// Checkpoint (signed tree head)
     pub checkpoint: String,
     /// Hashes in the proof path (hex-encoded in V1 API)
@@ -123,7 +126,7 @@ pub struct DsseEntry {
 #[serde(rename_all = "camelCase")]
 pub struct DsseEntrySpec {
     pub proposed_content: DsseProposedContent,
-    pub signatures: Vec<DsseSignature>,
+    pub signatures: Vec<DsseEntrySignature>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -133,9 +136,13 @@ pub struct DsseProposedContent {
     pub verifiers: Vec<String>,
 }
 
+/// Signature entry in a Rekor DSSE entry.
+///
+/// Note: This is different from `sigstore_types::DsseSignature` which represents
+/// signatures in the DSSE envelope format itself.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct DsseSignature {
+pub struct DsseEntrySignature {
     pub signature: String,
     pub verifier: String,
 }

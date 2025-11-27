@@ -6,7 +6,7 @@
 use crate::error::{Error, Result};
 use base64::Engine;
 use serde::Serialize;
-use sigstore_crypto::{verify_signature, SignedNote, SigningScheme};
+use sigstore_crypto::{verify_signature, Checkpoint, SigningScheme};
 use sigstore_trust_root::TrustedRoot;
 use sigstore_types::bundle::InclusionProof;
 use sigstore_types::{Bundle, TransparencyLogEntry};
@@ -93,20 +93,20 @@ pub fn verify_checkpoint(
 ) -> Result<()> {
     use sigstore_crypto::verify_signature_auto;
 
-    // Parse the signed note
-    let signed_note = SignedNote::from_text(checkpoint_envelope)
+    // Parse the checkpoint (signed note)
+    let checkpoint = Checkpoint::from_text(checkpoint_envelope)
         .map_err(|e| Error::Verification(format!("Failed to parse checkpoint: {}", e)))?;
 
     // Verify that the checkpoint's root hash matches the inclusion proof's root hash
-    let checkpoint_root_hash = &signed_note.checkpoint.root_hash;
+    let checkpoint_root_hash = &checkpoint.root_hash;
 
     // The root hash in the inclusion proof is already a Sha256Hash
     let proof_root_hash = &inclusion_proof.root_hash;
 
-    if checkpoint_root_hash.as_slice() != proof_root_hash.as_bytes() {
+    if checkpoint_root_hash.as_bytes() != proof_root_hash.as_bytes() {
         return Err(Error::Verification(format!(
             "Checkpoint root hash mismatch: expected {}, got {}",
-            hex::encode(checkpoint_root_hash),
+            checkpoint_root_hash.to_hex(),
             proof_root_hash.to_hex()
         )));
     }
@@ -117,12 +117,12 @@ pub fn verify_checkpoint(
         .map_err(|e| Error::Verification(format!("Failed to get Rekor keys: {}", e)))?;
 
     // For each signature in the checkpoint, try to find a matching key and verify
-    for sig in &signed_note.signatures {
+    for sig in &checkpoint.signatures {
         // Find the key with matching key hint
         for (key_hint, key_bytes) in &rekor_keys {
-            if &sig.key_id == key_hint {
+            if sig.key_id.as_slice() == key_hint.as_slice() {
                 // Found matching key, verify the signature using automatic key type detection
-                let message = signed_note.checkpoint_text.as_bytes();
+                let message = checkpoint.signed_data();
 
                 verify_signature_auto(key_bytes, &sig.signature, message).map_err(|e| {
                     Error::Verification(format!("Checkpoint signature verification failed: {}", e))

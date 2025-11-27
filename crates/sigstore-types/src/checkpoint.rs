@@ -2,32 +2,64 @@
 //!
 //! A checkpoint represents a signed commitment to the state of a transparency log.
 //! Format specified in: <https://github.com/transparency-dev/formats/blob/main/log/README.md>
+//!
+//! # Format
+//!
+//! A checkpoint (also known as a "signed note") consists of a text header and signature lines,
+//! separated by a blank line:
+//!
+//! ```text
+//! <origin>
+//! <tree_size>
+//! <root_hash_base64>
+//! <optional_metadata>
+//!
+//! — <signer_name> <signature_base64>
+//! ```
+//!
+//! The signature lines begin with the Unicode em dash (U+2014, "—"), not an ASCII hyphen.
+//! Each base64-decoded signature consists of a 4-byte key ID followed by the signature bytes.
 
 use crate::encoding::{base64_bytes, Sha256Hash};
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 
-/// A checkpoint (signed tree head) from a transparency log
+/// A checkpoint (signed tree head) from a transparency log.
+///
+/// Also known as a "signed note" in the Go ecosystem. Contains the log state
+/// (origin, tree size, root hash) plus one or more cryptographic signatures.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Checkpoint {
-    /// The origin string identifying the log
+    /// The origin string identifying the log (e.g., "rekor.sigstore.dev - 2605736670972794746")
     pub origin: String,
-    /// Tree size (number of leaves)
+    /// Tree size (number of leaves/entries in the log)
     pub tree_size: u64,
     /// Root hash of the Merkle tree (32 bytes SHA-256)
     pub root_hash: Sha256Hash,
-    /// Other data lines (optional extension data)
+    /// Other data lines (optional extension data, e.g., "Timestamp: 1689177396617352539")
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub other_content: Vec<String>,
     /// Signatures over the checkpoint
     pub signatures: Vec<CheckpointSignature>,
+    /// Raw text of the checkpoint body (used for signature verification).
+    /// This is the text before the blank line separator, with trailing newline.
+    #[serde(skip)]
+    pub signed_note_text: String,
 }
 
-/// A signature on a checkpoint
+/// A signature on a checkpoint.
+///
+/// Each signature consists of:
+/// - A name identifying the signer (e.g., "rekor.sigstore.dev")
+/// - A 4-byte key ID (key hint) used to match the signature to a public key
+/// - The signature bytes
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CheckpointSignature {
+    /// The name of the signer (appears after the em dash in the signature line)
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
     /// Key identifier (first 4 bytes of SHA-256 of the public key)
     #[serde(with = "base64_bytes")]
     pub key_id: Vec<u8>,
@@ -52,7 +84,25 @@ impl Checkpoint {
     pub fn from_text(text: &str) -> Result<Self> {
         use base64::{engine::general_purpose::STANDARD, Engine};
 
-        let mut lines = text.lines();
+        if text.is_empty() {
+            return Err(Error::InvalidCheckpoint("empty checkpoint".to_string()));
+        }
+
+        // Split into checkpoint body and signatures at the blank line
+        let parts: Vec<&str> = text.split("\n\n").collect();
+        if parts.len() < 2 {
+            return Err(Error::InvalidCheckpoint(
+                "missing blank line separator".to_string(),
+            ));
+        }
+
+        let checkpoint_body = parts[0];
+        let signatures_text = parts[1];
+
+        // Store the signed note text (checkpoint body with trailing newline)
+        let signed_note_text = format!("{}\n", checkpoint_body);
+
+        let mut lines = checkpoint_body.lines();
 
         // Parse origin
         let origin = lines
@@ -60,6 +110,10 @@ impl Checkpoint {
             .ok_or_else(|| Error::InvalidCheckpoint("missing origin".to_string()))?
             .trim()
             .to_string();
+
+        if origin.is_empty() {
+            return Err(Error::InvalidCheckpoint("empty origin".to_string()));
+        }
 
         // Parse tree size
         let tree_size_str = lines
@@ -81,56 +135,61 @@ impl Checkpoint {
         let root_hash = Sha256Hash::try_from_slice(&root_hash_bytes)
             .map_err(|e| Error::InvalidCheckpoint(format!("invalid root hash: {}", e)))?;
 
-        // Parse other content until empty line
-        let mut other_content = Vec::new();
-        let mut signatures = Vec::new();
+        // Remaining lines are other content (metadata)
+        let other_content: Vec<String> = lines
+            .map(|line| line.trim().to_string())
+            .filter(|line| !line.is_empty())
+            .collect();
 
-        for line in lines {
+        // Parse signatures
+        let mut signatures = Vec::new();
+        for line in signatures_text.lines() {
+            let line = line.trim();
             if line.is_empty() {
                 continue;
             }
 
-            if line.starts_with("— ") || line.starts_with("\u{2014} ") {
-                // This is a signature line
-                // Format: — <origin> <key_id_base64><signature_base64>
-                // Note: key_id is first 4 bytes (encoded), signature follows directly
-                let content = if let Some(stripped) = line.strip_prefix("— ") {
-                    stripped
-                } else if let Some(stripped) = line.strip_prefix("\u{2014} ") {
-                    stripped
-                } else {
-                    unreachable!("line must start with one of the prefixes")
-                };
-
-                // Split into origin and key_id+signature
-                let parts: Vec<&str> = content.splitn(2, ' ').collect();
-                if parts.len() != 2 {
-                    return Err(Error::InvalidCheckpoint(
-                        "invalid signature line format".to_string(),
-                    ));
-                }
-
-                let key_and_sig = parts[1];
-                // Key ID is first 4 bytes = first 8 base64 chars (4 bytes = 32 bits / 6 = ~5.3, but padded to 8)
-                // Actually, let's decode the whole thing and split by size
-                let decoded = STANDARD.decode(key_and_sig).map_err(|_| {
-                    Error::InvalidCheckpoint("invalid signature base64".to_string())
-                })?;
-
-                if decoded.len() < 4 {
-                    return Err(Error::InvalidCheckpoint(
-                        "signature too short for key_id".to_string(),
-                    ));
-                }
-
-                let key_id = decoded[..4].to_vec();
-                let signature = decoded[4..].to_vec();
-
-                signatures.push(CheckpointSignature { key_id, signature });
-            } else {
-                // Other content line
-                other_content.push(line.to_string());
+            // Signature line format: — <name> <base64_signature>
+            // The em dash (U+2014) is required at the start
+            if !line.starts_with('—') {
+                return Err(Error::InvalidCheckpoint(
+                    "signature line must start with em dash (U+2014)".to_string(),
+                ));
             }
+
+            let parts: Vec<&str> = line.split_whitespace().collect();
+            if parts.len() < 3 {
+                return Err(Error::InvalidCheckpoint(
+                    "signature line must have format: — <name> <base64_signature>".to_string(),
+                ));
+            }
+
+            let name = parts[1].to_string();
+            let key_and_sig_b64 = parts[2];
+
+            let decoded = STANDARD.decode(key_and_sig_b64).map_err(|_| {
+                Error::InvalidCheckpoint("invalid signature base64".to_string())
+            })?;
+
+            if decoded.len() < 5 {
+                return Err(Error::InvalidCheckpoint(
+                    "signature too short (must be at least 5 bytes for key_id + signature)"
+                        .to_string(),
+                ));
+            }
+
+            let key_id = decoded[..4].to_vec();
+            let signature = decoded[4..].to_vec();
+
+            signatures.push(CheckpointSignature {
+                name,
+                key_id,
+                signature,
+            });
+        }
+
+        if signatures.is_empty() {
+            return Err(Error::InvalidCheckpoint("no signatures found".to_string()));
         }
 
         Ok(Checkpoint {
@@ -139,10 +198,13 @@ impl Checkpoint {
             root_hash,
             other_content,
             signatures,
+            signed_note_text,
         })
     }
 
-    /// Encode the checkpoint to its text representation (without signatures)
+    /// Encode the checkpoint to its text representation (without signatures).
+    ///
+    /// This returns the signed note body that can be used for signature verification.
     pub fn to_signed_note_body(&self) -> String {
         let mut result = format!(
             "{}\n{}\n{}\n",
@@ -157,6 +219,24 @@ impl Checkpoint {
         }
 
         result
+    }
+
+    /// Find a signature matching the given key hint (key ID).
+    ///
+    /// The key hint is the first 4 bytes of SHA-256(public_key_der).
+    /// Returns the signature if found, or None if no matching signature exists.
+    pub fn find_signature_by_key_hint(&self, key_hint: &[u8]) -> Option<&CheckpointSignature> {
+        self.signatures
+            .iter()
+            .find(|sig| sig.key_id.as_slice() == key_hint)
+    }
+
+    /// Get the raw signed note text for signature verification.
+    ///
+    /// This is the checkpoint body (before the blank line) with trailing newline,
+    /// which is what gets signed.
+    pub fn signed_data(&self) -> &[u8] {
+        self.signed_note_text.as_bytes()
     }
 }
 
@@ -179,7 +259,53 @@ npv1T/m9N8zX0jPlbh4rB51zL6GpnV9bQaXSOdzAV+s=
             "rekor.sigstore.dev - 1193050959916656506"
         );
         assert_eq!(checkpoint.tree_size, 42591958);
-        assert_eq!(checkpoint.root_hash.as_bytes().len(), 32); // Sha256Hash is always 32 bytes
+        assert_eq!(checkpoint.root_hash.as_bytes().len(), 32);
         assert_eq!(checkpoint.signatures.len(), 1);
+        assert_eq!(checkpoint.signatures[0].name, "rekor.sigstore.dev");
+        assert_eq!(checkpoint.signatures[0].key_id.len(), 4);
+
+        // Check that signed_note_text is preserved for verification
+        assert!(!checkpoint.signed_note_text.is_empty());
+        assert!(checkpoint.signed_note_text.starts_with("rekor.sigstore.dev"));
+    }
+
+    #[test]
+    fn test_parse_checkpoint_with_metadata() {
+        let checkpoint_text = "rekor.sigstore.dev - 2605736670972794746
+23083062
+dauhleYK4YyAdxwwDtR0l0KnSOWZdG2bwqHftlanvcI=
+Timestamp: 1689177396617352539
+
+— rekor.sigstore.dev xNI9ajBFAiBxaGyEtxkzFLkaCSEJqFuSS3dJjEZCNiyByVs1CNVQ8gIhAOoNnXtmMtTctV2oRnSRUZAo4EWUYPK/vBsqOzAU6TMs
+";
+
+        let checkpoint = Checkpoint::from_text(checkpoint_text).unwrap();
+        assert_eq!(checkpoint.tree_size, 23083062);
+        assert_eq!(checkpoint.other_content.len(), 1);
+        assert_eq!(
+            checkpoint.other_content[0],
+            "Timestamp: 1689177396617352539"
+        );
+    }
+
+    #[test]
+    fn test_find_signature_by_key_hint() {
+        let checkpoint_text = "rekor.sigstore.dev - 1193050959916656506
+42591958
+npv1T/m9N8zX0jPlbh4rB51zL6GpnV9bQaXSOdzAV+s=
+
+— rekor.sigstore.dev wNI9ajBFAiEA0OP4Pv5ks5MoTTwcM0kS6HMn8gZ5fFPjT9s6vVqXgHkCIDCe5qWSdM4OXpCQ1YNP2KpLo1r/2dRfFHXkPR5h3ywe
+";
+
+        let checkpoint = Checkpoint::from_text(checkpoint_text).unwrap();
+        let key_hint = &checkpoint.signatures[0].key_id;
+
+        let found = checkpoint.find_signature_by_key_hint(key_hint);
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().name, "rekor.sigstore.dev");
+
+        // Non-existent key hint
+        let not_found = checkpoint.find_signature_by_key_hint(&[0, 0, 0, 0]);
+        assert!(not_found.is_none());
     }
 }

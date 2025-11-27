@@ -10,7 +10,7 @@ pub mod parse;
 pub mod verify;
 
 pub use asn1::{
-    AlgorithmIdentifier, MessageImprint, PkiStatus, TimeStampReq, TimeStampResp, TstInfo,
+    AlgorithmIdentifier, Asn1MessageImprint, PkiStatus, TimeStampReq, TimeStampResp, TstInfo,
 };
 pub use client::{timestamp_sigstore, TimestampClient};
 pub use error::{Error, Result};

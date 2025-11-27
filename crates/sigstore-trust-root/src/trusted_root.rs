@@ -4,7 +4,7 @@ use crate::{Error, Result};
 use chrono::{DateTime, Utc};
 use rustls_pki_types::CertificateDer;
 use serde::{Deserialize, Serialize};
-use sigstore_types::{DerCertificate, DerPublicKey, HashAlgorithm, LogKeyId};
+use sigstore_types::{DerCertificate, DerPublicKey, HashAlgorithm, LogId, LogKeyId};
 use std::collections::HashMap;
 
 /// TSA certificate with optional validity period (start, end)
@@ -61,7 +61,7 @@ pub struct TransparencyLog {
 pub struct CertificateAuthority {
     /// Subject information
     #[serde(default)]
-    pub subject: Subject,
+    pub subject: CertificateSubject,
 
     /// URI of the CA
     pub uri: String,
@@ -97,7 +97,7 @@ pub struct CertificateTransparencyLog {
 pub struct TimestampAuthority {
     /// Subject information
     #[serde(default)]
-    pub subject: Subject,
+    pub subject: CertificateSubject,
 
     /// URI of the TSA
     #[serde(default)]
@@ -126,18 +126,13 @@ pub struct PublicKey {
     pub valid_for: Option<ValidityPeriod>,
 }
 
-/// Log identifier
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct LogId {
-    /// Key ID (base64 encoded)
-    pub key_id: LogKeyId,
-}
-
-/// Subject information for a certificate
+/// Subject information for a certificate.
+///
+/// Note: This is different from `sigstore_types::Subject` which represents
+/// an in-toto Statement subject (artifact name + digest).
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct Subject {
+pub struct CertificateSubject {
     /// Organization name
     #[serde(default)]
     pub organization: Option<String>,
