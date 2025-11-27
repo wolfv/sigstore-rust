@@ -167,9 +167,9 @@ impl Checkpoint {
             let name = parts[1].to_string();
             let key_and_sig_b64 = parts[2];
 
-            let decoded = STANDARD.decode(key_and_sig_b64).map_err(|_| {
-                Error::InvalidCheckpoint("invalid signature base64".to_string())
-            })?;
+            let decoded = STANDARD
+                .decode(key_and_sig_b64)
+                .map_err(|_| Error::InvalidCheckpoint("invalid signature base64".to_string()))?;
 
             if decoded.len() < 5 {
                 return Err(Error::InvalidCheckpoint(
@@ -266,7 +266,9 @@ npv1T/m9N8zX0jPlbh4rB51zL6GpnV9bQaXSOdzAV+s=
 
         // Check that signed_note_text is preserved for verification
         assert!(!checkpoint.signed_note_text.is_empty());
-        assert!(checkpoint.signed_note_text.starts_with("rekor.sigstore.dev"));
+        assert!(checkpoint
+            .signed_note_text
+            .starts_with("rekor.sigstore.dev"));
     }
 
     #[test]

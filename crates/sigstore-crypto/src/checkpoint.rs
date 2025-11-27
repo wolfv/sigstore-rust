@@ -156,9 +156,9 @@ impl CheckpointVerifyExt for Checkpoint {
         let key_hint = compute_key_hint(public_key_der);
 
         // Find signature with matching key hint
-        let signature = self.find_signature_by_key_hint(&key_hint).ok_or_else(|| {
-            Error::Checkpoint("No signature found matching key hint".to_string())
-        })?;
+        let signature = self
+            .find_signature_by_key_hint(&key_hint)
+            .ok_or_else(|| Error::Checkpoint("No signature found matching key hint".to_string()))?;
 
         // The signed data is the checkpoint text (without the signatures part)
         let signed_data = self.signed_data();
