@@ -71,6 +71,6 @@ jobs:
       - name: Build conformance binary
         run: cargo build --release --package sigstore-conformance
 
-      - uses: sigstore/sigstore-conformance@v0.0.12
+      - uses: sigstore/sigstore-conformance@main
         with:
           entrypoint: ./target/release/conformance
