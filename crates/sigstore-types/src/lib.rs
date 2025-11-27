@@ -24,5 +24,5 @@ pub use encoding::{
     SignatureBytes, SignedTimestamp, TimestampToken,
 };
 pub use error::{Error, Result};
-pub use hash::{HashAlgorithm, HashOutput, MessageImprint};
+pub use hash::HashAlgorithm;
 pub use intoto::{Digest, Statement, Subject};

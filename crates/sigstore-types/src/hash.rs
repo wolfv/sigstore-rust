@@ -88,39 +88,6 @@ impl<'de> Deserialize<'de> for HashAlgorithm {
     }
 }
 
-/// A hash output with its algorithm
-/// TODO: This is unused?
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HashOutput {
-    /// The algorithm used to produce this hash
-    pub algorithm: HashAlgorithm,
-    /// The hash digest bytes
-    pub digest: Vec<u8>,
-}
-
-impl HashOutput {
-    /// Create a new hash output
-    pub fn new(algorithm: HashAlgorithm, digest: Vec<u8>) -> Self {
-        Self { algorithm, digest }
-    }
-
-    /// Get the digest as a hex string
-    pub fn to_hex(&self) -> String {
-        self.digest.iter().map(|b| format!("{:02x}", b)).collect()
-    }
-}
-
-/// Message imprint combining algorithm and digest (for TSA)
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct MessageImprint {
-    /// Hash algorithm used
-    pub algorithm: HashAlgorithm,
-    /// Hash digest (base64 encoded in JSON)
-    #[serde(with = "crate::encoding::base64_bytes")]
-    pub digest: Vec<u8>,
-}
-
 // Re-export base64_bytes from encoding module for backwards compatibility
 pub use crate::encoding::base64_bytes;
 
