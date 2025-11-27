@@ -60,34 +60,6 @@ jobs:
   conformance:
     name: Sigstore Conformance
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@1.89.0
-
-      - name: Build conformance binary
-        run: cargo build --release --example conformance --package sigstore-verify
-
-      - name: Clone sigstore-conformance
-        run: |
-          git clone --depth 1 https://github.com/sigstore/sigstore-conformance.git
-          cd sigstore-conformance
-          pip install .
-
-      - name: Run sigstore-conformance
-        env:
-          GHA_SIGSTORE_CONFORMANCE_XFAIL: ""
-        run: |
-          pytest sigstore-conformance/test \
-            --entrypoint ./target/release/examples/conformance \
-            --skip-signing \
-            -v
-
-  # Optional: Run full signing tests (requires OIDC token)
-  conformance-signing:
-    name: Sigstore Conformance (with signing)
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     permissions:
       id-token: write
       contents: read
@@ -97,18 +69,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.89.0
 
       - name: Build conformance binary
-        run: cargo build --release --example conformance --package sigstore-verify
+        run: cargo build --release --package sigstore-conformance
 
-      - name: Clone sigstore-conformance
-        run: |
-          git clone --depth 1 https://github.com/sigstore/sigstore-conformance.git
-          cd sigstore-conformance
-          pip install .
-
-      - name: Run sigstore-conformance (with signing)
-        env:
-          GHA_SIGSTORE_CONFORMANCE_XFAIL: ""
-        run: |
-          pytest sigstore-conformance/test \
-            --entrypoint ./target/release/examples/conformance \
-            -v
+      - uses: sigstore/sigstore-conformance@v0.0.12
+        with:
+          entrypoint: ./target/release/conformance

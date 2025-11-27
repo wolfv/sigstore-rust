@@ -12,6 +12,7 @@ members = [
     "crates/sigstore-oidc",
     "crates/sigstore-verify",
     "crates/sigstore-sign",
+    "crates/sigstore-conformance",
 ]
 
 [workspace.package]

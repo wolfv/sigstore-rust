@@ -5,16 +5,15 @@
 //!
 //! This binary implements the conformance test protocol for Sigstore clients.
 
-use sigstore_verify::bundle::{BundleBuilder, TlogEntryBuilder};
-use sigstore_verify::crypto::{KeyPair, PublicKeyPem};
-use sigstore_verify::types::{Bundle, MediaType, Sha256Hash};
-use sigstore_verify::{verify_with_trusted_root, VerificationPolicy};
-
+use sigstore_bundle::{BundleBuilder, TlogEntryBuilder};
+use sigstore_crypto::{KeyPair, PublicKeyPem};
 use sigstore_fulcio::FulcioClient;
 use sigstore_oidc::parse_identity_token;
-use sigstore_verify::rekor::RekorClient;
+use sigstore_rekor::RekorClient;
+use sigstore_trust_root::TrustedRoot;
+use sigstore_types::{Bundle, MediaType, Sha256Hash, SignatureContent};
+use sigstore_verify::{verify_with_trusted_root, VerificationPolicy};
 
-use sigstore_verify::trust_root::TrustedRoot;
 use std::env;
 use std::fs;
 use std::process;
@@ -244,7 +243,7 @@ async fn sign_bundle(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     let signature_b64 = base64::engine::general_purpose::STANDARD.encode(signature.as_bytes());
 
     // Compute artifact hash using sigstore-crypto
-    let hash_bytes = sigstore_verify::crypto::sha256(&artifact_data);
+    let hash_bytes = sigstore_crypto::sha256(&artifact_data);
     let artifact_hash_typed = Sha256Hash::from_bytes(hash_bytes);
 
     // For v2, we still need hex for now
@@ -257,14 +256,14 @@ async fn sign_bundle(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     let public_key_pem = PublicKeyPem::new(leaf_cert_pem.to_string());
 
     let log_entry = if use_rekor_v2 {
-        let hashed_rekord = sigstore_verify::rekor::HashedRekordV2::new(
+        let hashed_rekord = sigstore_rekor::HashedRekordV2::new(
             &artifact_hash_hex,
             &signature_b64,
             leaf_cert_pem,
         );
         rekor.create_entry_v2(hashed_rekord).await?
     } else {
-        let hashed_rekord = sigstore_verify::rekor::HashedRekord::new(
+        let hashed_rekord = sigstore_rekor::HashedRekord::new(
             &artifact_hash_typed,
             &signature,
             &public_key_pem,
@@ -285,10 +284,10 @@ async fn sign_bundle(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
 
     if let Some(tsa_url) = tsa_url {
         eprintln!("Using TSA: {}", tsa_url);
-        let tsa_client = sigstore_verify::tsa::TimestampClient::new(tsa_url);
+        let tsa_client = sigstore_tsa::TimestampClient::new(tsa_url);
 
         // Hash the signature
-        let signature_digest = sigstore_verify::crypto::sha256(signature.as_bytes());
+        let signature_digest = sigstore_crypto::sha256(signature.as_bytes());
 
         // Timestamp the signature digest
         let timestamp_der = tsa_client.timestamp_sha256(&signature_digest).await?;
@@ -404,8 +403,6 @@ fn verify_bundle(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
         }
 
         // Extract expected hash from bundle
-        use sigstore_verify::types::SignatureContent;
-
         let expected_hash = match &bundle.content {
             SignatureContent::MessageSignature(msg_sig) => {
                 if let Some(digest) = &msg_sig.message_digest {

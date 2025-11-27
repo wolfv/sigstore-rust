@@ -40,13 +40,6 @@ serde_json = { workspace = true }
 const-oid = { workspace = true }
 x509-cert = { workspace = true }
 sigstore-types = { path = "../sigstore-types" }
-sigstore-sign = { path = "../sigstore-sign" }
-sigstore-fulcio = { path = "../sigstore-fulcio" }
-sigstore-oidc = { path = "../sigstore-oidc" }
-
-[[example]]
-name = "conformance"
-required-features = []
 
 [features]
 default = []
