@@ -6,12 +6,20 @@ use sigstore_crypto::KeyPair;
 use sigstore_oidc::IdentityToken;
 use sigstore_types::{DerCertificate, SignatureBytes};
 
+#[cfg(feature = "cache")]
+use sigstore_cache::{CacheAdapter, CacheKey};
+#[cfg(feature = "cache")]
+use std::sync::Arc;
+
 /// A client for interacting with Fulcio
 pub struct FulcioClient {
     /// Base URL of the Fulcio instance
     url: String,
     /// HTTP client
     client: reqwest::Client,
+    /// Optional cache adapter
+    #[cfg(feature = "cache")]
+    cache: Option<Arc<dyn CacheAdapter>>,
 }
 
 impl FulcioClient {
@@ -20,6 +28,8 @@ impl FulcioClient {
         Self {
             url: url.into(),
             client: reqwest::Client::new(),
+            #[cfg(feature = "cache")]
+            cache: None,
         }
     }
 
@@ -33,8 +43,45 @@ impl FulcioClient {
         Self::new("https://fulcio.sigstage.dev")
     }
 
+    /// Create a builder for configuring the client
+    pub fn builder(url: impl Into<String>) -> FulcioClientBuilder {
+        FulcioClientBuilder::new(url)
+    }
+
     /// Get the OIDC configuration (supported issuers)
+    ///
+    /// With the `cache` feature enabled and a cache configured, this will
+    /// cache the configuration with the default TTL (7 days).
     pub async fn get_configuration(&self) -> Result<Configuration> {
+        #[cfg(feature = "cache")]
+        if let Some(ref cache) = self.cache {
+            if let Ok(Some(cached)) = cache.get(CacheKey::FulcioConfiguration).await {
+                if let Ok(config) = serde_json::from_slice(&cached) {
+                    return Ok(config);
+                }
+            }
+        }
+
+        let config = self.fetch_configuration().await?;
+
+        #[cfg(feature = "cache")]
+        if let Some(ref cache) = self.cache {
+            if let Ok(json) = serde_json::to_vec(&config) {
+                let _ = cache
+                    .set(
+                        CacheKey::FulcioConfiguration,
+                        &json,
+                        CacheKey::FulcioConfiguration.default_ttl(),
+                    )
+                    .await;
+            }
+        }
+
+        Ok(config)
+    }
+
+    /// Fetch configuration from the API (bypassing cache)
+    async fn fetch_configuration(&self) -> Result<Configuration> {
         let url = format!("{}/api/v2/configuration", self.url);
         let response = self
             .client
@@ -121,7 +168,39 @@ impl FulcioClient {
     }
 
     /// Get the trust bundle (CA certificates)
+    ///
+    /// With the `cache` feature enabled and a cache configured, this will
+    /// cache the trust bundle with the default TTL (24 hours).
     pub async fn get_trust_bundle(&self) -> Result<TrustBundle> {
+        #[cfg(feature = "cache")]
+        if let Some(ref cache) = self.cache {
+            if let Ok(Some(cached)) = cache.get(CacheKey::FulcioTrustBundle).await {
+                if let Ok(bundle) = serde_json::from_slice(&cached) {
+                    return Ok(bundle);
+                }
+            }
+        }
+
+        let bundle = self.fetch_trust_bundle().await?;
+
+        #[cfg(feature = "cache")]
+        if let Some(ref cache) = self.cache {
+            if let Ok(json) = serde_json::to_vec(&bundle) {
+                let _ = cache
+                    .set(
+                        CacheKey::FulcioTrustBundle,
+                        &json,
+                        CacheKey::FulcioTrustBundle.default_ttl(),
+                    )
+                    .await;
+            }
+        }
+
+        Ok(bundle)
+    }
+
+    /// Fetch trust bundle from the API (bypassing cache)
+    async fn fetch_trust_bundle(&self) -> Result<TrustBundle> {
         let url = format!("{}/api/v2/trustBundle", self.url);
         let response = self
             .client
@@ -141,6 +220,70 @@ impl FulcioClient {
             .json()
             .await
             .map_err(|e| Error::Http(format!("failed to parse JSON: {}", e)))
+    }
+}
+
+/// Builder for configuring a [`FulcioClient`]
+///
+/// # Example
+///
+/// ```no_run
+/// use sigstore_fulcio::FulcioClient;
+///
+/// // Without caching
+/// let client = FulcioClient::builder("https://fulcio.sigstore.dev")
+///     .build();
+/// ```
+///
+/// With the `cache` feature enabled:
+///
+/// ```ignore
+/// use sigstore_fulcio::FulcioClient;
+/// use sigstore_cache::FileSystemCache;
+///
+/// let cache = FileSystemCache::default_location()?;
+/// let client = FulcioClient::builder("https://fulcio.sigstore.dev")
+///     .with_cache(cache)
+///     .build();
+/// ```
+pub struct FulcioClientBuilder {
+    url: String,
+    #[cfg(feature = "cache")]
+    cache: Option<Arc<dyn CacheAdapter>>,
+}
+
+impl FulcioClientBuilder {
+    /// Create a new builder with the given URL
+    pub fn new(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            #[cfg(feature = "cache")]
+            cache: None,
+        }
+    }
+
+    /// Set the cache adapter
+    #[cfg(feature = "cache")]
+    pub fn with_cache(mut self, cache: impl CacheAdapter + 'static) -> Self {
+        self.cache = Some(Arc::new(cache));
+        self
+    }
+
+    /// Set a shared cache adapter
+    #[cfg(feature = "cache")]
+    pub fn with_shared_cache(mut self, cache: Arc<dyn CacheAdapter>) -> Self {
+        self.cache = Some(cache);
+        self
+    }
+
+    /// Build the client
+    pub fn build(self) -> FulcioClient {
+        FulcioClient {
+            url: self.url,
+            client: reqwest::Client::new(),
+            #[cfg(feature = "cache")]
+            cache: self.cache,
+        }
     }
 }
 

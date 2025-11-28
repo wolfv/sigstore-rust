@@ -7,6 +7,7 @@ members = [
     "crates/sigstore-tsa",
     "crates/sigstore-trust-root",
     "crates/sigstore-bundle",
+    "crates/sigstore-cache",
     "crates/sigstore-rekor",
     "crates/sigstore-fulcio",
     "crates/sigstore-oidc",
@@ -94,5 +95,6 @@ sigstore-bundle = { path = "crates/sigstore-bundle", version = "0.2.0" }
 sigstore-rekor = { path = "crates/sigstore-rekor", version = "0.2.0" }
 sigstore-fulcio = { path = "crates/sigstore-fulcio", version = "0.2.0" }
 sigstore-oidc = { path = "crates/sigstore-oidc", version = "0.2.0" }
+sigstore-cache = { path = "crates/sigstore-cache", version = "0.2.0" }
 sigstore-verify = { path = "crates/sigstore-verify", version = "0.2.0" }
 sigstore-sign = { path = "crates/sigstore-sign", version = "0.2.0" }

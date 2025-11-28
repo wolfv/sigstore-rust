@@ -1,0 +1,28 @@
+[package]
+name = "sigstore-cache"
+description = "Flexible caching support for Sigstore clients"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+# Error handling
+thiserror.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# Async
+tokio = { workspace = true, features = ["fs", "sync", "time"] }
+
+# Directory utilities
+directories.workspace = true
+
+# Time
+chrono.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

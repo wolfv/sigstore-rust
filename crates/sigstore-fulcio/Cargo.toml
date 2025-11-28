@@ -7,10 +7,15 @@ license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+cache = ["sigstore-cache"]
+
 [dependencies]
 sigstore-types = { workspace = true }
 sigstore-crypto = { workspace = true }
 sigstore-oidc = { workspace = true }
+sigstore-cache = { workspace = true, optional = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true, features = ["rustls-tls"] }

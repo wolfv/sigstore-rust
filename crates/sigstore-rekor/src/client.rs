@@ -5,12 +5,20 @@ use crate::entry::{
 };
 use crate::error::{Error, Result};
 
+#[cfg(feature = "cache")]
+use sigstore_cache::{CacheAdapter, CacheKey};
+#[cfg(feature = "cache")]
+use std::sync::Arc;
+
 /// A client for interacting with Rekor
 pub struct RekorClient {
     /// Base URL of the Rekor instance
     url: String,
     /// HTTP client
     client: reqwest::Client,
+    /// Optional cache adapter
+    #[cfg(feature = "cache")]
+    cache: Option<Arc<dyn CacheAdapter>>,
 }
 
 impl RekorClient {
@@ -19,6 +27,8 @@ impl RekorClient {
         Self {
             url: url.into(),
             client: reqwest::Client::new(),
+            #[cfg(feature = "cache")]
+            cache: None,
         }
     }
 
@@ -32,8 +42,45 @@ impl RekorClient {
         Self::new("https://rekor.sigstage.dev")
     }
 
+    /// Create a builder for configuring the client
+    pub fn builder(url: impl Into<String>) -> RekorClientBuilder {
+        RekorClientBuilder::new(url)
+    }
+
     /// Get log info (tree size, root hash, etc.)
+    ///
+    /// With the `cache` feature enabled and a cache configured, this will
+    /// cache the log info with the default TTL (1 hour).
     pub async fn get_log_info(&self) -> Result<LogInfo> {
+        #[cfg(feature = "cache")]
+        if let Some(ref cache) = self.cache {
+            if let Ok(Some(cached)) = cache.get(CacheKey::RekorLogInfo).await {
+                if let Ok(info) = serde_json::from_slice(&cached) {
+                    return Ok(info);
+                }
+            }
+        }
+
+        let info = self.fetch_log_info().await?;
+
+        #[cfg(feature = "cache")]
+        if let Some(ref cache) = self.cache {
+            if let Ok(json) = serde_json::to_vec(&info) {
+                let _ = cache
+                    .set(
+                        CacheKey::RekorLogInfo,
+                        &json,
+                        CacheKey::RekorLogInfo.default_ttl(),
+                    )
+                    .await;
+            }
+        }
+
+        Ok(info)
+    }
+
+    /// Fetch log info from the API (bypassing cache)
+    async fn fetch_log_info(&self) -> Result<LogInfo> {
         let url = format!("{}/api/v1/log", self.url);
         let response = self
             .client
@@ -276,7 +323,37 @@ impl RekorClient {
     }
 
     /// Get the public key of the log
+    ///
+    /// With the `cache` feature enabled and a cache configured, this will
+    /// cache the public key with the default TTL (24 hours).
     pub async fn get_public_key(&self) -> Result<String> {
+        #[cfg(feature = "cache")]
+        if let Some(ref cache) = self.cache {
+            if let Ok(Some(cached)) = cache.get(CacheKey::RekorPublicKey).await {
+                if let Ok(key) = String::from_utf8(cached) {
+                    return Ok(key);
+                }
+            }
+        }
+
+        let key = self.fetch_public_key().await?;
+
+        #[cfg(feature = "cache")]
+        if let Some(ref cache) = self.cache {
+            let _ = cache
+                .set(
+                    CacheKey::RekorPublicKey,
+                    key.as_bytes(),
+                    CacheKey::RekorPublicKey.default_ttl(),
+                )
+                .await;
+        }
+
+        Ok(key)
+    }
+
+    /// Fetch public key from the API (bypassing cache)
+    async fn fetch_public_key(&self) -> Result<String> {
         let url = format!("{}/api/v1/log/publicKey", self.url);
         let response = self
             .client
@@ -296,6 +373,70 @@ impl RekorClient {
             .text()
             .await
             .map_err(|e| Error::Http(e.to_string()))
+    }
+}
+
+/// Builder for configuring a [`RekorClient`]
+///
+/// # Example
+///
+/// ```no_run
+/// use sigstore_rekor::RekorClient;
+///
+/// // Without caching
+/// let client = RekorClient::builder("https://rekor.sigstore.dev")
+///     .build();
+/// ```
+///
+/// With the `cache` feature enabled:
+///
+/// ```ignore
+/// use sigstore_rekor::RekorClient;
+/// use sigstore_cache::FileSystemCache;
+///
+/// let cache = FileSystemCache::default_location()?;
+/// let client = RekorClient::builder("https://rekor.sigstore.dev")
+///     .with_cache(cache)
+///     .build();
+/// ```
+pub struct RekorClientBuilder {
+    url: String,
+    #[cfg(feature = "cache")]
+    cache: Option<Arc<dyn CacheAdapter>>,
+}
+
+impl RekorClientBuilder {
+    /// Create a new builder with the given URL
+    pub fn new(url: impl Into<String>) -> Self {
+        Self {
+            url: url.into(),
+            #[cfg(feature = "cache")]
+            cache: None,
+        }
+    }
+
+    /// Set the cache adapter
+    #[cfg(feature = "cache")]
+    pub fn with_cache(mut self, cache: impl CacheAdapter + 'static) -> Self {
+        self.cache = Some(Arc::new(cache));
+        self
+    }
+
+    /// Set a shared cache adapter
+    #[cfg(feature = "cache")]
+    pub fn with_shared_cache(mut self, cache: Arc<dyn CacheAdapter>) -> Self {
+        self.cache = Some(cache);
+        self
+    }
+
+    /// Build the client
+    pub fn build(self) -> RekorClient {
+        RekorClient {
+            url: self.url,
+            client: reqwest::Client::new(),
+            #[cfg(feature = "cache")]
+            cache: self.cache,
+        }
     }
 }
 
