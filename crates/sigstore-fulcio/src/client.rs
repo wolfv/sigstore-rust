@@ -140,7 +140,7 @@ impl FulcioClient {
                     algorithm: String::new(), // Not needed for PEM (contains algorithm info)
                     content: public_key_pem,
                 },
-                proof_of_possession: proof_of_possession.into(),
+                proof_of_possession,
             },
         };
 

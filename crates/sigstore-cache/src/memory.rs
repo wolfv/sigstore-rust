@@ -1,13 +1,12 @@
 //! In-memory cache implementation with TTL support
 
 use std::collections::HashMap;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::RwLock;
 
-use crate::{CacheAdapter, CacheKey, Result};
+use crate::{CacheAdapter, CacheKey};
 
 /// A cached entry with expiration time
 #[derive(Debug, Clone)]
@@ -95,10 +94,7 @@ impl InMemoryCache {
 }
 
 impl CacheAdapter for InMemoryCache {
-    fn get(
-        &self,
-        key: CacheKey,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<Option<Vec<u8>>>> + Send + '_>> {
+    fn get(&self, key: CacheKey) -> crate::CacheGetFuture<'_> {
         Box::pin(async move {
             let entries = self.entries.read().await;
 
@@ -116,12 +112,7 @@ impl CacheAdapter for InMemoryCache {
         })
     }
 
-    fn set(
-        &self,
-        key: CacheKey,
-        value: &[u8],
-        ttl: Duration,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
+    fn set(&self, key: CacheKey, value: &[u8], ttl: Duration) -> crate::CacheOpFuture<'_> {
         let value = value.to_vec();
         Box::pin(async move {
             let entry = CacheEntry {
@@ -136,10 +127,7 @@ impl CacheAdapter for InMemoryCache {
         })
     }
 
-    fn remove(
-        &self,
-        key: CacheKey,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
+    fn remove(&self, key: CacheKey) -> crate::CacheOpFuture<'_> {
         Box::pin(async move {
             let mut entries = self.entries.write().await;
             entries.remove(&key);
@@ -147,7 +135,7 @@ impl CacheAdapter for InMemoryCache {
         })
     }
 
-    fn clear(&self) -> Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
+    fn clear(&self) -> crate::CacheOpFuture<'_> {
         Box::pin(async move {
             let mut entries = self.entries.write().await;
             entries.clear();

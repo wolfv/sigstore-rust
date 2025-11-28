@@ -46,6 +46,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+/// Future type for cache get operations
+pub type CacheGetFuture<'a> = Pin<Box<dyn Future<Output = Result<Option<Vec<u8>>>> + Send + 'a>>;
+
+/// Future type for cache set/remove/clear operations
+pub type CacheOpFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
+
 /// Cache keys for different Sigstore resources
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CacheKey {
@@ -99,26 +105,18 @@ pub trait CacheAdapter: Send + Sync {
     /// Returns `Ok(Some(data))` if the key exists and hasn't expired,
     /// `Ok(None)` if the key doesn't exist or has expired,
     /// or `Err(...)` on I/O or other errors.
-    fn get(
-        &self,
-        key: CacheKey,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<Vec<u8>>>> + Send + '_>>;
+    fn get(&self, key: CacheKey) -> CacheGetFuture<'_>;
 
     /// Set a cached value with a TTL
     ///
     /// The value will be considered expired after `ttl` has elapsed.
-    fn set(
-        &self,
-        key: CacheKey,
-        value: &[u8],
-        ttl: Duration,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>>;
+    fn set(&self, key: CacheKey, value: &[u8], ttl: Duration) -> CacheOpFuture<'_>;
 
     /// Remove a cached value
-    fn remove(&self, key: CacheKey) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>>;
+    fn remove(&self, key: CacheKey) -> CacheOpFuture<'_>;
 
     /// Clear all cached values
-    fn clear(&self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>>;
+    fn clear(&self) -> CacheOpFuture<'_>;
 }
 
 /// Extension trait providing convenience methods for caching
@@ -169,54 +167,38 @@ impl<T: CacheAdapter + ?Sized> CacheAdapterExt for T {}
 
 // Also implement CacheAdapter for Arc<T> where T: CacheAdapter
 impl<T: CacheAdapter + ?Sized> CacheAdapter for Arc<T> {
-    fn get(
-        &self,
-        key: CacheKey,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<Vec<u8>>>> + Send + '_>> {
+    fn get(&self, key: CacheKey) -> CacheGetFuture<'_> {
         (**self).get(key)
     }
 
-    fn set(
-        &self,
-        key: CacheKey,
-        value: &[u8],
-        ttl: Duration,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
+    fn set(&self, key: CacheKey, value: &[u8], ttl: Duration) -> CacheOpFuture<'_> {
         (**self).set(key, value, ttl)
     }
 
-    fn remove(&self, key: CacheKey) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
+    fn remove(&self, key: CacheKey) -> CacheOpFuture<'_> {
         (**self).remove(key)
     }
 
-    fn clear(&self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
+    fn clear(&self) -> CacheOpFuture<'_> {
         (**self).clear()
     }
 }
 
 // Implement CacheAdapter for Box<dyn CacheAdapter>
 impl CacheAdapter for Box<dyn CacheAdapter> {
-    fn get(
-        &self,
-        key: CacheKey,
-    ) -> Pin<Box<dyn Future<Output = Result<Option<Vec<u8>>>> + Send + '_>> {
+    fn get(&self, key: CacheKey) -> CacheGetFuture<'_> {
         (**self).get(key)
     }
 
-    fn set(
-        &self,
-        key: CacheKey,
-        value: &[u8],
-        ttl: Duration,
-    ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
+    fn set(&self, key: CacheKey, value: &[u8], ttl: Duration) -> CacheOpFuture<'_> {
         (**self).set(key, value, ttl)
     }
 
-    fn remove(&self, key: CacheKey) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
+    fn remove(&self, key: CacheKey) -> CacheOpFuture<'_> {
         (**self).remove(key)
     }
 
-    fn clear(&self) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
+    fn clear(&self) -> CacheOpFuture<'_> {
         (**self).clear()
     }
 }

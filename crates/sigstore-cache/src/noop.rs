@@ -1,9 +1,8 @@
 //! No-op cache implementation (caching disabled)
 
-use std::pin::Pin;
 use std::time::Duration;
 
-use crate::{CacheAdapter, CacheKey, Result};
+use crate::{CacheAdapter, CacheKey};
 
 /// A no-op cache that doesn't store anything
 ///
@@ -31,30 +30,19 @@ use crate::{CacheAdapter, CacheKey, Result};
 pub struct NoCache;
 
 impl CacheAdapter for NoCache {
-    fn get(
-        &self,
-        _key: CacheKey,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<Option<Vec<u8>>>> + Send + '_>> {
+    fn get(&self, _key: CacheKey) -> crate::CacheGetFuture<'_> {
         Box::pin(async { Ok(None) })
     }
 
-    fn set(
-        &self,
-        _key: CacheKey,
-        _value: &[u8],
-        _ttl: Duration,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
+    fn set(&self, _key: CacheKey, _value: &[u8], _ttl: Duration) -> crate::CacheOpFuture<'_> {
         Box::pin(async { Ok(()) })
     }
 
-    fn remove(
-        &self,
-        _key: CacheKey,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
+    fn remove(&self, _key: CacheKey) -> crate::CacheOpFuture<'_> {
         Box::pin(async { Ok(()) })
     }
 
-    fn clear(&self) -> Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
+    fn clear(&self) -> crate::CacheOpFuture<'_> {
         Box::pin(async { Ok(()) })
     }
 }

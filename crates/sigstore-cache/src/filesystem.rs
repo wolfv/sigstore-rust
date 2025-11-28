@@ -1,7 +1,6 @@
 //! File system based cache implementation
 
 use std::path::{Path, PathBuf};
-use std::pin::Pin;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -196,10 +195,7 @@ impl FileSystemCache {
 }
 
 impl CacheAdapter for FileSystemCache {
-    fn get(
-        &self,
-        key: CacheKey,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<Option<Vec<u8>>>> + Send + '_>> {
+    fn get(&self, key: CacheKey) -> crate::CacheGetFuture<'_> {
         Box::pin(async move {
             // Check if metadata exists and is valid
             if self.read_valid_metadata(key).await?.is_none() {
@@ -216,12 +212,7 @@ impl CacheAdapter for FileSystemCache {
         })
     }
 
-    fn set(
-        &self,
-        key: CacheKey,
-        value: &[u8],
-        ttl: Duration,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
+    fn set(&self, key: CacheKey, value: &[u8], ttl: Duration) -> crate::CacheOpFuture<'_> {
         let value = value.to_vec();
         Box::pin(async move {
             self.ensure_dir().await?;
@@ -246,10 +237,7 @@ impl CacheAdapter for FileSystemCache {
         })
     }
 
-    fn remove(
-        &self,
-        key: CacheKey,
-    ) -> Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
+    fn remove(&self, key: CacheKey) -> crate::CacheOpFuture<'_> {
         Box::pin(async move {
             let cache_path = self.cache_path(key);
             let meta_path = self.meta_path(key);
@@ -262,7 +250,7 @@ impl CacheAdapter for FileSystemCache {
         })
     }
 
-    fn clear(&self) -> Pin<Box<dyn std::future::Future<Output = Result<()>> + Send + '_>> {
+    fn clear(&self) -> crate::CacheOpFuture<'_> {
         Box::pin(async move {
             // Remove all .cache and .meta files in the cache directory
             let mut entries = match fs::read_dir(&self.cache_dir).await {
