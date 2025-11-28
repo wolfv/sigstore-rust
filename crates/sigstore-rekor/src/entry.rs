@@ -1,8 +1,7 @@
 //! Rekor log entry types
 
-use base64::Engine;
 use serde::{Deserialize, Serialize};
-use sigstore_crypto::{CertificatePem, Signature};
+use sigstore_crypto::Signature;
 use sigstore_types::{
     CanonicalizedBody, CheckpointData, DerCertificate, EntryUuid, HashAlgorithm, HexLogId,
     InclusionPromise, KindVersion, LogId, PemContent, Sha256Hash, SignatureBytes, SignedTimestamp,
@@ -159,8 +158,8 @@ impl DsseEntry {
     ///
     /// # Arguments
     /// * `envelope` - The DSSE envelope containing signatures
-    /// * `certificate_pem` - PEM-encoded certificate (will be base64-encoded for API)
-    pub fn new(envelope: &sigstore_types::DsseEnvelope, certificate_pem: &str) -> Self {
+    /// * `certificate` - DER-encoded X.509 certificate from Fulcio
+    pub fn new(envelope: &sigstore_types::DsseEnvelope, certificate: &DerCertificate) -> Self {
         use base64::Engine;
 
         // Serialize envelope to JSON (Rekor expects JSON string, not base64)
@@ -168,7 +167,8 @@ impl DsseEntry {
             serde_json::to_string(envelope).expect("Failed to serialize DSSE envelope");
 
         // Rekor API expects the PEM to be base64-encoded
-        let cert_base64 = base64::engine::general_purpose::STANDARD.encode(certificate_pem);
+        let cert_pem = certificate.to_pem();
+        let cert_base64 = base64::engine::general_purpose::STANDARD.encode(&cert_pem);
 
         // When using proposedContent, do NOT include signatures separately -
         // they are extracted from the envelope by the Rekor server
@@ -245,18 +245,20 @@ impl HashedRekord {
     /// Create a new HashedRekord entry with a certificate
     ///
     /// The certificate (obtained from Fulcio) contains the identity binding that
-    /// verifiers need to validate. The `CertificatePem` type ensures you can't
-    /// accidentally pass a public key.
+    /// verifiers need to validate.
     ///
     /// # Arguments
     /// * `artifact_hash` - SHA256 hash of the artifact
     /// * `signature` - Signature bytes
-    /// * `certificate_pem` - PEM-encoded X.509 certificate from Fulcio
+    /// * `certificate` - DER-encoded X.509 certificate from Fulcio
     pub fn new(
         artifact_hash: &Sha256Hash,
         signature: &Signature,
-        certificate_pem: &CertificatePem,
+        certificate: &DerCertificate,
     ) -> Self {
+        // Convert DER to PEM for Rekor V1 API
+        let cert_pem = certificate.to_pem();
+
         Self {
             api_version: "0.0.1".to_string(),
             kind: "hashedrekord".to_string(),
@@ -270,7 +272,7 @@ impl HashedRekord {
                 signature: HashedRekordSignature {
                     content: signature.clone().into(),
                     public_key: HashedRekordPublicKey {
-                        content: certificate_pem.clone().into(),
+                        content: PemContent::new(cert_pem.into_bytes()),
                     },
                 },
             },
@@ -323,36 +325,30 @@ pub struct HashedRekordPublicKeyV2 {
 }
 
 impl HashedRekordV2 {
-    /// Create a new HashedRekordV2 entry
+    /// Create a new HashedRekordV2 entry with a certificate
+    ///
+    /// The certificate (obtained from Fulcio) contains the identity binding that
+    /// verifiers need to validate.
     ///
     /// # Arguments
-    /// * `artifact_hash` - Hex-encoded SHA256 hash of the artifact
-    /// * `signature_base64` - Base64-encoded signature
-    /// * `public_key_pem` - PEM-encoded public key or certificate
-    pub fn new(artifact_hash: &str, signature_base64: &str, public_key_pem: &str) -> Self {
-        // Extract DER from PEM
-        let cert_der =
-            sigstore_crypto::x509::der_from_pem(public_key_pem).expect("invalid PEM certificate");
-
-        // Convert hex hash to bytes
-        let hash_bytes = hex::decode(artifact_hash).expect("invalid hex hash");
-        let hash = Sha256Hash::try_from_slice(&hash_bytes).expect("invalid hash length");
-
-        // Decode signature from base64
-        let sig_bytes = base64::engine::general_purpose::STANDARD
-            .decode(signature_base64)
-            .expect("invalid base64 signature");
-
+    /// * `artifact_hash` - SHA256 hash of the artifact
+    /// * `signature` - Signature bytes
+    /// * `certificate` - DER-encoded X.509 certificate from Fulcio
+    pub fn new(
+        artifact_hash: &Sha256Hash,
+        signature: &Signature,
+        certificate: &DerCertificate,
+    ) -> Self {
         Self {
             request: HashedRekordRequestV002 {
-                digest: hash,
+                digest: artifact_hash.clone(),
                 signature: HashedRekordSignatureV2 {
-                    content: SignatureBytes::new(sig_bytes),
+                    content: signature.clone().into(),
                     verifier: HashedRekordVerifierV2 {
                         // Assuming ECDSA P-256 SHA-256 for now as per conformance tests
                         key_details: "PKIX_ECDSA_P256_SHA_256".to_string(),
                         x509_certificate: Some(HashedRekordPublicKeyV2 {
-                            content: DerCertificate::new(cert_der),
+                            content: certificate.clone(),
                         }),
                         public_key: None,
                     },
@@ -416,9 +412,7 @@ mod tests {
         let entry = HashedRekord::new(
             &Sha256Hash::from_bytes([0u8; 32]),
             &Signature::from_bytes(b"signature"),
-            &CertificatePem::new(
-                "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----".to_string(),
-            ),
+            &DerCertificate::new(vec![0x30, 0x00]), // Minimal DER sequence
         );
         assert_eq!(entry.kind, "hashedrekord");
         assert_eq!(entry.api_version, "0.0.1");
@@ -439,9 +433,7 @@ mod tests {
         let entry = HashedRekord::new(
             &Sha256Hash::from_bytes([0u8; 32]),
             &Signature::from_bytes(b"signature"),
-            &CertificatePem::new(
-                "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----".to_string(),
-            ),
+            &DerCertificate::new(vec![0x30, 0x00]), // Minimal DER sequence
         );
         let json = serde_json::to_string(&entry).unwrap();
         // Verify the algorithm is serialized as lowercase "sha256" for Rekor API

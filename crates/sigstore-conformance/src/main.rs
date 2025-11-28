@@ -6,11 +6,12 @@
 //! This binary implements the conformance test protocol for Sigstore clients.
 
 use sigstore_bundle::{BundleV03, TlogEntryBuilder};
-use sigstore_crypto::{CertificatePem, KeyPair};
+use sigstore_crypto::KeyPair;
 use sigstore_fulcio::FulcioClient;
 use sigstore_oidc::parse_identity_token;
 use sigstore_rekor::RekorClient;
 use sigstore_trust_root::TrustedRoot;
+use sigstore_tsa::TimestampClient;
 use sigstore_types::{Bundle, DerCertificate, SignatureContent};
 use sigstore_verify::{verify, VerificationPolicy};
 
@@ -200,29 +201,18 @@ async fn sign_bundle(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     // Sign the artifact
     let signature = key_pair.sign(&artifact_data)?;
 
-    // For Rekor V2 API, signature needs to be base64-encoded
-    use base64::Engine;
-    let signature_b64 = base64::engine::general_purpose::STANDARD.encode(signature.as_bytes());
-
     // Compute artifact hash using sigstore-crypto
     let artifact_hash = sigstore_crypto::sha256(&artifact_data);
 
-    // For v2, we still need hex for now
-    let artifact_hash_hex = artifact_hash.to_hex();
-
-    // Upload to Rekor
+    // Upload to Rekor - both V1 and V2 APIs accept DerCertificate directly
     let rekor = RekorClient::new(&rekor_url);
-
-    // Use CertificatePem for type-safe Rekor entry creation
-    let certificate_pem = CertificatePem::new(leaf_cert_pem.to_string());
-
     let log_entry = if use_rekor_v2 {
         let hashed_rekord =
-            sigstore_rekor::HashedRekordV2::new(&artifact_hash_hex, &signature_b64, leaf_cert_pem);
+            sigstore_rekor::HashedRekordV2::new(&artifact_hash, &signature, &leaf_cert_der);
         rekor.create_entry_v2(hashed_rekord).await?
     } else {
         let hashed_rekord =
-            sigstore_rekor::HashedRekord::new(&artifact_hash, &signature, &certificate_pem);
+            sigstore_rekor::HashedRekord::new(&artifact_hash, &signature, &leaf_cert_der);
         rekor.create_entry(hashed_rekord).await?
     };
 
@@ -237,15 +227,12 @@ async fn sign_bundle(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
 
     if let Some(tsa_url) = tsa_url {
         eprintln!("Using TSA: {}", tsa_url);
-        let tsa_client = sigstore_tsa::TimestampClient::new(tsa_url);
+        let tsa_client = TimestampClient::new(tsa_url);
 
-        // Hash the signature
-        let signature_digest = sigstore_crypto::sha256(signature.as_bytes());
+        // Timestamp the signature
+        let timestamp = tsa_client.timestamp_signature(&signature).await?;
 
-        // Timestamp the signature digest
-        let timestamp_der = tsa_client.timestamp_sha256(&signature_digest).await?;
-
-        bundle = bundle.with_rfc3161_timestamp(timestamp_der);
+        bundle = bundle.with_rfc3161_timestamp(timestamp);
     }
 
     let bundle = bundle.into_bundle();

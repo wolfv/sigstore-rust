@@ -100,9 +100,9 @@ impl BundleV03 {
     }
 
     /// Add an RFC 3161 timestamp.
-    pub fn with_rfc3161_timestamp(mut self, signed_timestamp: Vec<u8>) -> Self {
+    pub fn with_rfc3161_timestamp(mut self, timestamp: TimestampToken) -> Self {
         self.rfc3161_timestamps.push(Rfc3161Timestamp {
-            signed_timestamp: TimestampToken::new(signed_timestamp),
+            signed_timestamp: timestamp,
         });
         self
     }

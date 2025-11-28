@@ -2,7 +2,8 @@
 
 use crate::asn1::{AlgorithmIdentifier, Asn1MessageImprint, TimeStampReq, TimeStampResp};
 use crate::error::{Error, Result};
-use sigstore_types::Sha256Hash;
+use sigstore_crypto::Signature;
+use sigstore_types::TimestampToken;
 
 /// A client for interacting with a Time-Stamp Authority
 pub struct TimestampClient {
@@ -38,8 +39,12 @@ impl TimestampClient {
     /// * `algorithm` - The hash algorithm used
     ///
     /// # Returns
-    /// The raw timestamp token (DER-encoded CMS SignedData)
-    async fn timestamp(&self, digest: &[u8], algorithm: AlgorithmIdentifier) -> Result<Vec<u8>> {
+    /// The timestamp token (DER-encoded RFC 3161 response)
+    async fn timestamp(
+        &self,
+        digest: &[u8],
+        algorithm: AlgorithmIdentifier,
+    ) -> Result<TimestampToken> {
         // Build the timestamp request
         let imprint = Asn1MessageImprint::new(algorithm, digest.to_vec());
         let request = TimeStampReq::new(imprint);
@@ -83,18 +88,16 @@ impl TimestampClient {
             )));
         }
 
-        // Return the full response bytes (TimeStampResp) as required by Sigstore bundle
-        Ok(response_bytes.to_vec())
+        // Return the timestamp token
+        Ok(TimestampToken::new(response_bytes.to_vec()))
     }
 
-    /// Request a timestamp for a SHA-256 digest
-    pub async fn timestamp_sha256(&self, digest: &Sha256Hash) -> Result<Vec<u8>> {
+    /// Request a timestamp for a signature
+    ///
+    /// This is the most common use case - timestamps the SHA-256 hash of the signature bytes.
+    pub async fn timestamp_signature(&self, signature: &Signature) -> Result<TimestampToken> {
+        let digest = sigstore_crypto::sha256(signature.as_bytes());
         self.timestamp(digest.as_bytes(), AlgorithmIdentifier::sha256())
             .await
     }
-}
-
-/// Convenience function to get a timestamp from the Sigstore TSA
-pub async fn timestamp_sigstore(digest: &Sha256Hash) -> Result<Vec<u8>> {
-    TimestampClient::sigstore().timestamp_sha256(digest).await
 }

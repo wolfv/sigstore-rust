@@ -4,12 +4,12 @@
 
 use crate::error::{Error, Result};
 use sigstore_bundle::{BundleV03, TlogEntryBuilder};
-use sigstore_crypto::{CertificatePem, KeyPair, Signature, SigningScheme};
+use sigstore_crypto::{KeyPair, Signature, SigningScheme};
 use sigstore_fulcio::FulcioClient;
 use sigstore_oidc::{parse_identity_token, IdentityToken};
 use sigstore_rekor::{HashedRekord, RekorClient};
 use sigstore_tsa::TimestampClient;
-use sigstore_types::{Bundle, DerCertificate};
+use sigstore_types::{Bundle, DerCertificate, TimestampToken};
 
 /// Configuration for signing operations
 #[derive(Debug, Clone)]
@@ -139,18 +139,18 @@ impl Signer {
         let key_pair = self.generate_ephemeral_keypair()?;
 
         // 2. Get signing certificate from Fulcio
-        let (leaf_cert_der, leaf_cert_pem) = self.request_certificate(&key_pair).await?;
+        let leaf_cert_der = self.request_certificate(&key_pair).await?;
 
         // 3. Sign the artifact
         let signature = key_pair.sign(artifact)?;
 
         // 4. Create Rekor entry (with certificate, not just public key)
         let tlog_entry = self
-            .create_rekor_entry(artifact, &signature, &leaf_cert_pem)
+            .create_rekor_entry(artifact, &signature, &leaf_cert_der)
             .await?;
 
         // 5. Get timestamp from TSA (optional)
-        let timestamp_der = if let Some(tsa_url) = &self.tsa_url {
+        let timestamp = if let Some(tsa_url) = &self.tsa_url {
             Some(self.request_timestamp(tsa_url, &signature).await?)
         } else {
             None
@@ -162,8 +162,8 @@ impl Signer {
             BundleV03::with_certificate_and_signature(leaf_cert_der, signature, artifact_hash)
                 .with_tlog_entry(tlog_entry.build());
 
-        if let Some(ts_der) = timestamp_der {
-            bundle = bundle.with_rfc3161_timestamp(ts_der);
+        if let Some(ts) = timestamp {
+            bundle = bundle.with_rfc3161_timestamp(ts);
         }
 
         Ok(bundle.into_bundle())
@@ -184,8 +184,8 @@ impl Signer {
 
     /// Request a signing certificate from Fulcio
     ///
-    /// Returns the leaf certificate as (DerCertificate, PEM string).
-    async fn request_certificate(&self, key_pair: &KeyPair) -> Result<(DerCertificate, String)> {
+    /// Returns the leaf certificate as DerCertificate.
+    async fn request_certificate(&self, key_pair: &KeyPair) -> Result<DerCertificate> {
         // Parse identity token to extract email or subject
         let token_info = parse_identity_token(self.identity_token.raw())?;
         let subject = token_info.email().unwrap_or(token_info.subject());
@@ -212,14 +212,11 @@ impl Signer {
         // Get the leaf certificate (v0.3 bundles use single cert, not chain)
         let leaf_cert_pem = cert_response
             .leaf_certificate()
-            .ok_or_else(|| Error::Signing("No leaf certificate in response".to_string()))?
-            .to_string();
+            .ok_or_else(|| Error::Signing("No leaf certificate in response".to_string()))?;
 
         // Parse PEM to type-safe DerCertificate (validates CERTIFICATE header)
-        let leaf_cert_der = DerCertificate::from_pem(&leaf_cert_pem)
-            .map_err(|e| Error::Signing(format!("Invalid certificate PEM: {}", e)))?;
-
-        Ok((leaf_cert_der, leaf_cert_pem))
+        DerCertificate::from_pem(leaf_cert_pem)
+            .map_err(|e| Error::Signing(format!("Invalid certificate PEM: {}", e)))
     }
 
     /// Create a Rekor entry for the signed artifact
@@ -227,18 +224,13 @@ impl Signer {
         &self,
         artifact: &[u8],
         signature: &Signature,
-        certificate_pem: &str,
+        certificate: &DerCertificate,
     ) -> Result<TlogEntryBuilder> {
         // Compute artifact hash
         let artifact_hash = sigstore_crypto::sha256(artifact);
 
-        // Use the certificate PEM for Rekor (not just the public key)
-        // This is required for proper verification - the Rekor entry must contain
-        // the certificate so verifiers can match it against the bundle
-        let cert_pem_obj = CertificatePem::new(certificate_pem.to_string());
-
         // Create hashedrekord entry with the certificate
-        let hashed_rekord = HashedRekord::new(&artifact_hash, signature, &cert_pem_obj);
+        let hashed_rekord = HashedRekord::new(&artifact_hash, signature, certificate);
 
         // Create Rekor client and upload
         let rekor = RekorClient::new(&self.rekor_url);
@@ -254,10 +246,13 @@ impl Signer {
     }
 
     /// Request a timestamp from the Timestamp Authority
-    async fn request_timestamp(&self, tsa_url: &str, signature: &Signature) -> Result<Vec<u8>> {
-        let signature_digest = sigstore_crypto::sha256(signature.as_bytes());
+    async fn request_timestamp(
+        &self,
+        tsa_url: &str,
+        signature: &Signature,
+    ) -> Result<TimestampToken> {
         let tsa = TimestampClient::new(tsa_url.to_string());
-        tsa.timestamp_sha256(&signature_digest)
+        tsa.timestamp_signature(signature)
             .await
             .map_err(|e| Error::Signing(format!("Failed to get timestamp: {}", e)))
     }
