@@ -55,52 +55,6 @@ impl From<PublicKeyPem> for PemContent {
     }
 }
 
-/// A PEM-encoded X.509 certificate
-///
-/// This type wraps a certificate in PEM format (with BEGIN/END CERTIFICATE headers).
-/// Use this type instead of `PublicKeyPem` when you have a certificate, to ensure
-/// type safety and prevent accidentally using a public key where a certificate is required.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CertificatePem(String);
-
-impl CertificatePem {
-    /// Create a new CertificatePem from a PEM string
-    ///
-    /// Note: This does not validate the PEM format.
-    pub fn new(pem: String) -> Self {
-        Self(pem)
-    }
-
-    /// Get the PEM string
-    pub fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    /// Consume and return the inner PEM string
-    pub fn into_string(self) -> String {
-        self.0
-    }
-}
-
-impl std::fmt::Display for CertificatePem {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl AsRef<str> for CertificatePem {
-    fn as_ref(&self) -> &str {
-        &self.0
-    }
-}
-
-impl From<CertificatePem> for PemContent {
-    fn from(pem: CertificatePem) -> Self {
-        // PemContent stores the PEM text as bytes (base64-encoded when serialized)
-        PemContent::from_bytes(pem.0.as_bytes())
-    }
-}
-
 /// A cryptographic signature
 ///
 /// This type wraps raw signature bytes. It can be created by signing

@@ -3,7 +3,7 @@
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 use sigstore_crypto::{PublicKeyPem, Signature};
-use sigstore_types::SignatureBytes;
+use sigstore_types::{DerCertificate, SignatureBytes};
 
 /// A client for interacting with Fulcio
 pub struct FulcioClient {
@@ -233,25 +233,44 @@ pub struct TrustBundle {
 }
 
 impl SigningCertificate {
-    /// Get the leaf certificate (PEM encoded)
-    pub fn leaf_certificate(&self) -> Option<&str> {
-        if let Some(embedded) = &self.signed_certificate_embedded_sct {
+    /// Get the leaf certificate as a type-safe DerCertificate
+    ///
+    /// This parses the PEM-encoded certificate and returns it as a DerCertificate,
+    /// which is more suitable for use with other sigstore APIs.
+    pub fn leaf_certificate(&self) -> Result<DerCertificate> {
+        let pem = if let Some(embedded) = &self.signed_certificate_embedded_sct {
             embedded.chain.certificates.first().map(|s| s.as_str())
         } else if let Some(detached) = &self.signed_certificate_detached_sct {
             detached.chain.certificates.first().map(|s| s.as_str())
         } else {
             None
-        }
+        };
+
+        DerCertificate::from_pem(
+            pem.ok_or_else(|| Error::Api("No certificate in response".to_string()))?,
+        )
+        .map_err(|e| Error::Api(format!("Invalid certificate PEM: {}", e)))
     }
 
-    /// Get all certificates in the chain
-    pub fn certificate_chain(&self) -> Option<&[String]> {
-        if let Some(embedded) = &self.signed_certificate_embedded_sct {
+    /// Get all certificates in the chain as type-safe DerCertificates
+    ///
+    /// This parses all PEM-encoded certificates and returns them as DerCertificates.
+    pub fn certificate_chain(&self) -> Result<Vec<DerCertificate>> {
+        let chain = if let Some(embedded) = &self.signed_certificate_embedded_sct {
             Some(&embedded.chain.certificates)
         } else if let Some(detached) = &self.signed_certificate_detached_sct {
             Some(&detached.chain.certificates)
         } else {
             None
-        }
+        };
+
+        chain
+            .ok_or_else(|| Error::Api("No certificate chain in response".to_string()))?
+            .iter()
+            .map(|pem| {
+                DerCertificate::from_pem(pem)
+                    .map_err(|e| Error::Api(format!("Invalid certificate PEM: {}", e)))
+            })
+            .collect()
     }
 }

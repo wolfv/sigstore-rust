@@ -210,13 +210,9 @@ impl Signer {
             .map_err(|e| Error::Signing(format!("Failed to get certificate from Fulcio: {}", e)))?;
 
         // Get the leaf certificate (v0.3 bundles use single cert, not chain)
-        let leaf_cert_pem = cert_response
+        cert_response
             .leaf_certificate()
-            .ok_or_else(|| Error::Signing("No leaf certificate in response".to_string()))?;
-
-        // Parse PEM to type-safe DerCertificate (validates CERTIFICATE header)
-        DerCertificate::from_pem(leaf_cert_pem)
-            .map_err(|e| Error::Signing(format!("Invalid certificate PEM: {}", e)))
+            .map_err(|e| Error::Signing(format!("Failed to get certificate: {}", e)))
     }
 
     /// Create a Rekor entry for the signed artifact

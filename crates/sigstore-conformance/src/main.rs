@@ -12,7 +12,7 @@ use sigstore_oidc::parse_identity_token;
 use sigstore_rekor::RekorClient;
 use sigstore_trust_root::TrustedRoot;
 use sigstore_tsa::TimestampClient;
-use sigstore_types::{Bundle, DerCertificate, SignatureContent};
+use sigstore_types::{Bundle, SignatureContent};
 use sigstore_verify::{verify, VerificationPolicy};
 
 use std::env;
@@ -190,13 +190,7 @@ async fn sign_bundle(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         .await?;
 
     // Get the leaf certificate (v0.3 bundles use single cert, not chain)
-    let leaf_cert_pem = cert_response
-        .leaf_certificate()
-        .ok_or("No leaf certificate in response")?;
-
-    // Parse PEM to type-safe DerCertificate (validates CERTIFICATE header)
-    let leaf_cert_der = DerCertificate::from_pem(leaf_cert_pem)
-        .map_err(|e| format!("Invalid certificate PEM: {}", e))?;
+    let leaf_cert = cert_response.leaf_certificate()?;
 
     // Sign the artifact
     let signature = key_pair.sign(&artifact_data)?;
@@ -208,11 +202,11 @@ async fn sign_bundle(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     let rekor = RekorClient::new(&rekor_url);
     let log_entry = if use_rekor_v2 {
         let hashed_rekord =
-            sigstore_rekor::HashedRekordV2::new(&artifact_hash, &signature, &leaf_cert_der);
+            sigstore_rekor::HashedRekordV2::new(&artifact_hash, &signature, &leaf_cert);
         rekor.create_entry_v2(hashed_rekord).await?
     } else {
         let hashed_rekord =
-            sigstore_rekor::HashedRekord::new(&artifact_hash, &signature, &leaf_cert_der);
+            sigstore_rekor::HashedRekord::new(&artifact_hash, &signature, &leaf_cert);
         rekor.create_entry(hashed_rekord).await?
     };
 
@@ -222,7 +216,7 @@ async fn sign_bundle(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
         TlogEntryBuilder::from_log_entry(&log_entry, "hashedrekord", kind_version).build();
 
     let mut bundle =
-        BundleV03::with_certificate_and_signature(leaf_cert_der, signature.clone(), artifact_hash)
+        BundleV03::with_certificate_and_signature(leaf_cert, signature.clone(), artifact_hash)
             .with_tlog_entry(tlog_entry);
 
     if let Some(tsa_url) = tsa_url {
