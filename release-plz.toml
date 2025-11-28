@@ -1,18 +1,6 @@
 [workspace]
-# Do not create a single GitHub release for the entire workspace.
-# Instead, create one release per crate.
-changelog_include = []
-
 # Enable git release for every crate
 git_release_enable = true
 
 # Use conventional commit parsing for changelogs
 changelog_update = true
-
-[changelog]
-# Filter commits by prefix, making the changelog cleaner
-body = """
-{% for commit in commits %}
-  - {{ commit.message }}
-{% endfor %}
-"""
