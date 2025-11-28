@@ -428,10 +428,22 @@ impl TrustedRoot {
 /// This is the default trusted root for Sigstore's public production instance.
 pub const SIGSTORE_PRODUCTION_TRUSTED_ROOT: &str = include_str!("trusted_root.json");
 
+/// Embedded staging trusted root from <https://tuf-repo-cdn.sigstage.dev/>
+/// This is the trusted root for Sigstore's staging/testing instance.
+pub const SIGSTORE_STAGING_TRUSTED_ROOT: &str = include_str!("trusted_root_staging.json");
+
 impl TrustedRoot {
     /// Load the default Sigstore production trusted root
     pub fn production() -> Result<Self> {
         Self::from_json(SIGSTORE_PRODUCTION_TRUSTED_ROOT)
+    }
+
+    /// Load the Sigstore staging trusted root
+    ///
+    /// This is useful for testing against the Sigstore staging environment
+    /// at <https://sigstage.dev>.
+    pub fn staging() -> Result<Self> {
+        Self::from_json(SIGSTORE_STAGING_TRUSTED_ROOT)
     }
 }
 
@@ -480,5 +492,23 @@ mod tests {
         let root = TrustedRoot::from_json(SAMPLE_TRUSTED_ROOT).unwrap();
         assert!(root.has_rekor_key(&LogKeyId::new("test-key-id".to_string())));
         assert!(!root.has_rekor_key(&LogKeyId::new("non-existent".to_string())));
+    }
+
+    #[test]
+    fn test_production_trusted_root() {
+        let root = TrustedRoot::production().unwrap();
+        assert!(!root.tlogs.is_empty());
+        assert!(!root.certificate_authorities.is_empty());
+        assert!(!root.ctlogs.is_empty());
+    }
+
+    #[test]
+    fn test_staging_trusted_root() {
+        let root = TrustedRoot::staging().unwrap();
+        assert!(!root.tlogs.is_empty());
+        assert!(!root.certificate_authorities.is_empty());
+        assert!(!root.ctlogs.is_empty());
+        // Staging should have different URLs from production
+        assert!(root.tlogs[0].base_url.contains("sigstage.dev"));
     }
 }

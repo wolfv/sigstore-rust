@@ -21,6 +21,9 @@
 //! // Load embedded production trusted root
 //! let root = TrustedRoot::production().unwrap();
 //!
+//! // Load embedded staging trusted root (for testing)
+//! let staging_root = TrustedRoot::staging().unwrap();
+//!
 //! // Or load from a file
 //! let root = TrustedRoot::from_file("trusted_root.json").unwrap();
 //! ```
@@ -43,7 +46,7 @@ pub mod tuf;
 pub use error::{Error, Result};
 pub use trusted_root::{
     CertificateAuthority, CertificateTransparencyLog, TimestampAuthority, TransparencyLog,
-    TrustedRoot, ValidityPeriod,
+    TrustedRoot, ValidityPeriod, SIGSTORE_PRODUCTION_TRUSTED_ROOT, SIGSTORE_STAGING_TRUSTED_ROOT,
 };
 
 #[cfg(feature = "tuf")]
