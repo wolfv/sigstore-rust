@@ -4,6 +4,7 @@
 //! through an extension trait on `sigstore_types::Checkpoint`.
 
 use crate::{Error, Result};
+use sigstore_types::{DerPublicKey, KeyHint, SignatureBytes};
 
 // Re-export checkpoint types from sigstore-types
 pub use sigstore_types::{Checkpoint, CheckpointSignature};
@@ -11,10 +12,10 @@ pub use sigstore_types::{Checkpoint, CheckpointSignature};
 /// Compute the key hint (4-byte key ID) from a public key.
 ///
 /// The key hint is the first 4 bytes of SHA-256(public key).
-pub fn compute_key_hint(public_key_der: &[u8]) -> [u8; 4] {
-    let hash = crate::hash::sha256(public_key_der);
+pub fn compute_key_hint(public_key: &DerPublicKey) -> KeyHint {
+    let hash = crate::hash::sha256(public_key.as_bytes());
     let bytes = hash.as_bytes();
-    [bytes[0], bytes[1], bytes[2], bytes[3]]
+    KeyHint::new([bytes[0], bytes[1], bytes[2], bytes[3]])
 }
 
 // OID constants for key type identification
@@ -38,10 +39,10 @@ pub enum KeyType {
 /// Detect the key type from SPKI-encoded public key bytes.
 ///
 /// This parses the SubjectPublicKeyInfo structure to determine the algorithm.
-pub fn detect_key_type(public_key_der: &[u8]) -> KeyType {
+pub fn detect_key_type(public_key: &DerPublicKey) -> KeyType {
     use spki::SubjectPublicKeyInfoRef;
 
-    match SubjectPublicKeyInfoRef::try_from(public_key_der) {
+    match SubjectPublicKeyInfoRef::try_from(public_key.as_bytes()) {
         Ok(spki) => {
             if spki.algorithm.oid == ID_ED25519 {
                 KeyType::Ed25519
@@ -55,7 +56,7 @@ pub fn detect_key_type(public_key_der: &[u8]) -> KeyType {
         Err(_) => {
             // If we can't parse as SPKI, might be raw key bytes
             // Check if it looks like a raw Ed25519 key (32 bytes)
-            if public_key_der.len() == 32 {
+            if public_key.as_bytes().len() == 32 {
                 KeyType::Ed25519
             } else {
                 KeyType::Unknown
@@ -68,17 +69,17 @@ pub fn detect_key_type(public_key_der: &[u8]) -> KeyType {
 ///
 /// For Ed25519, this extracts the 32-byte raw key from the SPKI wrapper.
 /// For ECDSA, the full SPKI is typically used by aws-lc-rs.
-pub fn extract_raw_key(public_key_der: &[u8]) -> Result<Vec<u8>> {
+pub fn extract_raw_key(public_key: &DerPublicKey) -> Result<Vec<u8>> {
     use spki::SubjectPublicKeyInfoRef;
 
-    match SubjectPublicKeyInfoRef::try_from(public_key_der) {
+    match SubjectPublicKeyInfoRef::try_from(public_key.as_bytes()) {
         Ok(spki) => {
             let raw_bytes = spki.subject_public_key.raw_bytes();
             Ok(raw_bytes.to_vec())
         }
         Err(_) => {
             // Already raw bytes
-            Ok(public_key_der.to_vec())
+            Ok(public_key.as_bytes().to_vec())
         }
     }
 }
@@ -86,30 +87,35 @@ pub fn extract_raw_key(public_key_der: &[u8]) -> Result<Vec<u8>> {
 /// Verify an Ed25519 signature.
 ///
 /// Accepts either SPKI-encoded or raw 32-byte public keys.
-pub fn verify_ed25519(public_key_der: &[u8], signature: &[u8], message: &[u8]) -> Result<()> {
-    use aws_lc_rs::signature;
+pub fn verify_ed25519(
+    public_key: &DerPublicKey,
+    signature: &SignatureBytes,
+    message: &[u8],
+) -> Result<()> {
+    use aws_lc_rs::signature as sig;
 
     // Extract raw key bytes from SPKI if needed
-    let raw_key = extract_raw_key(public_key_der)?;
+    let raw_key = extract_raw_key(public_key)?;
 
-    let public_key = signature::UnparsedPublicKey::new(&signature::ED25519, &raw_key);
-    public_key
-        .verify(message, signature)
+    let pk = sig::UnparsedPublicKey::new(&sig::ED25519, &raw_key);
+    pk.verify(message, signature.as_bytes())
         .map_err(|_| Error::Verification("Ed25519 verification failed".to_string()))
 }
 
 /// Verify an ECDSA P-256 signature.
 ///
 /// Expects SPKI-encoded public key (as produced by x509 certificates).
-pub fn verify_ecdsa_p256(public_key_der: &[u8], signature: &[u8], message: &[u8]) -> Result<()> {
-    use aws_lc_rs::signature;
+pub fn verify_ecdsa_p256(
+    public_key: &DerPublicKey,
+    signature: &SignatureBytes,
+    message: &[u8],
+) -> Result<()> {
+    use aws_lc_rs::signature as sig;
 
     // aws-lc-rs expects the full SPKI for ECDSA, or raw uncompressed point
-    let public_key =
-        signature::UnparsedPublicKey::new(&signature::ECDSA_P256_SHA256_ASN1, public_key_der);
+    let pk = sig::UnparsedPublicKey::new(&sig::ECDSA_P256_SHA256_ASN1, public_key.as_bytes());
 
-    public_key
-        .verify(message, signature)
+    pk.verify(message, signature.as_bytes())
         .map_err(|_| Error::Verification("ECDSA P-256 verification failed".to_string()))
 }
 
@@ -118,20 +124,20 @@ pub fn verify_ecdsa_p256(public_key_der: &[u8], signature: &[u8], message: &[u8]
 /// This function detects the key type from the SPKI structure and calls
 /// the appropriate verification function.
 pub fn verify_signature_auto(
-    public_key_der: &[u8],
-    signature: &[u8],
+    public_key: &DerPublicKey,
+    signature: &SignatureBytes,
     message: &[u8],
 ) -> Result<()> {
-    match detect_key_type(public_key_der) {
-        KeyType::Ed25519 => verify_ed25519(public_key_der, signature, message),
-        KeyType::EcdsaP256 => verify_ecdsa_p256(public_key_der, signature, message),
+    match detect_key_type(public_key) {
+        KeyType::Ed25519 => verify_ed25519(public_key, signature, message),
+        KeyType::EcdsaP256 => verify_ecdsa_p256(public_key, signature, message),
         KeyType::Unknown => {
             // Fallback: try both (maintains backwards compatibility)
             tracing::debug!("Unknown key type, trying Ed25519 then ECDSA P-256");
-            if verify_ed25519(public_key_der, signature, message).is_ok() {
+            if verify_ed25519(public_key, signature, message).is_ok() {
                 return Ok(());
             }
-            verify_ecdsa_p256(public_key_der, signature, message)
+            verify_ecdsa_p256(public_key, signature, message)
         }
     }
 }
@@ -148,13 +154,13 @@ pub trait CheckpointVerifyExt {
     /// The key type is automatically detected from the SPKI structure.
     ///
     /// Returns Ok(()) if verification succeeds, or an error if it fails.
-    fn verify_signature(&self, public_key_der: &[u8]) -> Result<()>;
+    fn verify_signature(&self, public_key: &DerPublicKey) -> Result<()>;
 }
 
 impl CheckpointVerifyExt for Checkpoint {
-    fn verify_signature(&self, public_key_der: &[u8]) -> Result<()> {
+    fn verify_signature(&self, public_key: &DerPublicKey) -> Result<()> {
         // Compute key hint from public key
-        let key_hint = compute_key_hint(public_key_der);
+        let key_hint = compute_key_hint(public_key);
 
         // Find signature with matching key hint
         let signature = self
@@ -165,7 +171,7 @@ impl CheckpointVerifyExt for Checkpoint {
         let signed_data = self.signed_data();
 
         // Use automatic key type detection
-        verify_signature_auto(public_key_der, &signature.signature, signed_data)
+        verify_signature_auto(public_key, &signature.signature, signed_data)
             .map_err(|e| Error::Checkpoint(format!("Signature verification failed: {}", e)))
     }
 }
@@ -199,6 +205,6 @@ mod tests {
         assert_eq!(checkpoint.signatures.len(), 1);
         assert_eq!(checkpoint.signatures[0].name, "rekor.sigstore.dev");
         // Key hint is first 4 bytes of base64-decoded signature
-        assert_eq!(checkpoint.signatures[0].key_id.len(), 4);
+        assert_eq!(checkpoint.signatures[0].key_id.as_bytes().len(), 4);
     }
 }

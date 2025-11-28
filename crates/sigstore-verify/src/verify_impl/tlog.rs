@@ -9,7 +9,7 @@ use serde::Serialize;
 use sigstore_crypto::{verify_signature, Checkpoint, SigningScheme};
 use sigstore_trust_root::TrustedRoot;
 use sigstore_types::bundle::InclusionProof;
-use sigstore_types::{Bundle, TransparencyLogEntry};
+use sigstore_types::{Bundle, SignatureBytes, TransparencyLogEntry};
 
 /// Verify transparency log entries (checkpoints and SETs)
 ///
@@ -115,12 +115,12 @@ pub fn verify_checkpoint(
     // For each signature in the checkpoint, try to find a matching key and verify
     for sig in &checkpoint.signatures {
         // Find the key with matching key hint
-        for (key_hint, key_bytes) in &rekor_keys {
-            if sig.key_id.as_slice() == key_hint.as_slice() {
+        for (key_hint, public_key) in &rekor_keys {
+            if &sig.key_id == key_hint {
                 // Found matching key, verify the signature using automatic key type detection
                 let message = checkpoint.signed_data();
 
-                verify_signature_auto(key_bytes, &sig.signature, message).map_err(|e| {
+                verify_signature_auto(public_key, &sig.signature, message).map_err(|e| {
                     Error::Verification(format!("Checkpoint signature verification failed: {}", e))
                 })?;
 
@@ -153,7 +153,7 @@ pub fn verify_set(entry: &TransparencyLogEntry, trusted_root: &TrustedRoot) -> R
         .ok_or(Error::Verification("Missing inclusion promise".into()))?;
 
     // Find the key for the log ID
-    let log_key_bytes = trusted_root
+    let log_key = trusted_root
         .rekor_key_for_log(&entry.log_id.key_id)
         .map_err(|_| Error::Verification(format!("Unknown log ID: {}", entry.log_id.key_id)))?;
 
@@ -185,13 +185,13 @@ pub fn verify_set(entry: &TransparencyLogEntry, trusted_root: &TrustedRoot) -> R
     let canonical_json = serde_json_canonicalizer::to_vec(&payload)
         .map_err(|e| Error::Verification(format!("Canonicalization failed: {}", e)))?;
 
-    // Get signature bytes
-    let signature = promise.signed_entry_timestamp.as_bytes();
+    // Get signature bytes from signed timestamp
+    let signature = SignatureBytes::new(promise.signed_entry_timestamp.as_bytes().to_vec());
 
     verify_signature(
-        &log_key_bytes,
+        &log_key,
         &canonical_json,
-        signature,
+        &signature,
         SigningScheme::EcdsaP256Sha256,
     )
     .map_err(|e| Error::Verification(format!("SET verification failed: {}", e)))?;

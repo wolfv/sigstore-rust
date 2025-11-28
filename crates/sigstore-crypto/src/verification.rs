@@ -36,14 +36,6 @@ impl VerificationKey {
         })
     }
 
-    /// Create a verification key from raw public key bytes (internal use)
-    fn from_raw_bytes(bytes: impl Into<Vec<u8>>, scheme: SigningScheme) -> Self {
-        Self {
-            bytes: bytes.into(),
-            scheme,
-        }
-    }
-
     /// Get the raw public key bytes
     pub fn as_bytes(&self) -> &[u8] {
         &self.bytes
@@ -155,30 +147,38 @@ impl VerificationKey {
 ///
 /// This is a convenience function that creates a temporary `VerificationKey`.
 /// For repeated verifications with the same key, prefer using `VerificationKey` directly.
+///
+/// # Arguments
+/// * `public_key` - DER-encoded SPKI public key
+/// * `data` - Data that was signed
+/// * `signature` - The signature to verify
+/// * `scheme` - The signing scheme used
 pub fn verify_signature(
-    public_key: &[u8],
+    public_key: &DerPublicKey,
     data: &[u8],
-    signature: &[u8],
+    signature: &SignatureBytes,
     scheme: SigningScheme,
 ) -> Result<()> {
-    VerificationKey::from_raw_bytes(public_key, scheme)
-        .verify(data, &SignatureBytes::from_bytes(signature))
+    VerificationKey::from_spki(public_key, scheme)?.verify(data, signature)
 }
 
 /// Verify a signature over prehashed data using the specified scheme
 ///
 /// This is used for hashedrekord verification where the signature is over
 /// the SHA-256 hash of the artifact, not the artifact itself.
+///
+/// # Arguments
+/// * `public_key` - DER-encoded SPKI public key
+/// * `digest` - SHA-256 hash of the artifact
+/// * `signature` - The signature to verify
+/// * `scheme` - The signing scheme used
 pub fn verify_signature_prehashed(
-    public_key: &[u8],
-    digest_bytes: &[u8],
-    signature: &[u8],
+    public_key: &DerPublicKey,
+    digest: &Sha256Hash,
+    signature: &SignatureBytes,
     scheme: SigningScheme,
 ) -> Result<()> {
-    let digest = Sha256Hash::try_from_slice(digest_bytes)
-        .map_err(|e| Error::Verification(format!("Invalid digest: {e}")))?;
-    VerificationKey::from_raw_bytes(public_key, scheme)
-        .verify_prehashed(&digest, &SignatureBytes::from_bytes(signature))
+    VerificationKey::from_spki(public_key, scheme)?.verify_prehashed(digest, signature)
 }
 
 #[cfg(test)]

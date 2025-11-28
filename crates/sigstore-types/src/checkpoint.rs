@@ -20,7 +20,7 @@
 //! The signature lines begin with the Unicode em dash (U+2014, "—"), not an ASCII hyphen.
 //! Each base64-decoded signature consists of a 4-byte key ID followed by the signature bytes.
 
-use crate::encoding::{base64_bytes, Sha256Hash};
+use crate::encoding::{KeyHint, Sha256Hash, SignatureBytes};
 use crate::error::{Error, Result};
 use serde::{Deserialize, Serialize};
 
@@ -61,11 +61,9 @@ pub struct CheckpointSignature {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub name: String,
     /// Key identifier (first 4 bytes of SHA-256 of the public key)
-    #[serde(with = "base64_bytes")]
-    pub key_id: Vec<u8>,
+    pub key_id: KeyHint,
     /// Signature bytes
-    #[serde(with = "base64_bytes")]
-    pub signature: Vec<u8>,
+    pub signature: SignatureBytes,
 }
 
 impl Checkpoint {
@@ -178,8 +176,8 @@ impl Checkpoint {
                 ));
             }
 
-            let key_id = decoded[..4].to_vec();
-            let signature = decoded[4..].to_vec();
+            let key_id = KeyHint::try_from_slice(&decoded[..4])?;
+            let signature = SignatureBytes::new(decoded[4..].to_vec());
 
             signatures.push(CheckpointSignature {
                 name,
@@ -225,10 +223,8 @@ impl Checkpoint {
     ///
     /// The key hint is the first 4 bytes of SHA-256(public_key_der).
     /// Returns the signature if found, or None if no matching signature exists.
-    pub fn find_signature_by_key_hint(&self, key_hint: &[u8]) -> Option<&CheckpointSignature> {
-        self.signatures
-            .iter()
-            .find(|sig| sig.key_id.as_slice() == key_hint)
+    pub fn find_signature_by_key_hint(&self, key_hint: &KeyHint) -> Option<&CheckpointSignature> {
+        self.signatures.iter().find(|sig| &sig.key_id == key_hint)
     }
 
     /// Get the raw signed note text for signature verification.
@@ -262,7 +258,7 @@ npv1T/m9N8zX0jPlbh4rB51zL6GpnV9bQaXSOdzAV+s=
         assert_eq!(checkpoint.root_hash.as_bytes().len(), 32);
         assert_eq!(checkpoint.signatures.len(), 1);
         assert_eq!(checkpoint.signatures[0].name, "rekor.sigstore.dev");
-        assert_eq!(checkpoint.signatures[0].key_id.len(), 4);
+        assert_eq!(checkpoint.signatures[0].key_id.as_bytes().len(), 4);
 
         // Check that signed_note_text is preserved for verification
         assert!(!checkpoint.signed_note_text.is_empty());
@@ -307,7 +303,7 @@ npv1T/m9N8zX0jPlbh4rB51zL6GpnV9bQaXSOdzAV+s=
         assert_eq!(found.unwrap().name, "rekor.sigstore.dev");
 
         // Non-existent key hint
-        let not_found = checkpoint.find_signature_by_key_hint(&[0, 0, 0, 0]);
+        let not_found = checkpoint.find_signature_by_key_hint(&KeyHint::new([0, 0, 0, 0]));
         assert!(not_found.is_none());
     }
 }

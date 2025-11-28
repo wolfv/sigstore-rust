@@ -6,7 +6,7 @@
 use crate::error::{Error, Result};
 use sigstore_rekor::body::RekorEntryBody;
 use sigstore_types::bundle::VerificationMaterialContent;
-use sigstore_types::{Bundle, DerCertificate, Sha256Hash, SignatureContent, TransparencyLogEntry};
+use sigstore_types::{Bundle, Sha256Hash, SignatureBytes, SignatureContent, TransparencyLogEntry};
 use x509_cert::der::Decode;
 use x509_cert::Certificate;
 
@@ -143,18 +143,13 @@ fn validate_certificate_match(
     // Extract certificate DER from Rekor entry
     let rekor_cert_der_opt = match body {
         RekorEntryBody::HashedRekordV001(rekord) => {
-            // v0.0.1: spec.signature.publicKey.content is base64-encoded PEM (PemContent)
-            // PemContent stores the PEM text as bytes
-            let pem_bytes = rekord.spec.signature.public_key.content.as_bytes();
-
-            let pem_str = String::from_utf8(pem_bytes.to_vec()).map_err(|e| {
-                Error::Verification(format!("public key PEM not valid UTF-8: {}", e))
-            })?;
-
-            // Parse PEM to get DER certificate
-            let cert = DerCertificate::from_pem(&pem_str).map_err(|e| {
-                Error::Verification(format!("failed to parse certificate PEM: {}", e))
-            })?;
+            // v0.0.1: parse PEM certificate from publicKey content
+            let cert = rekord
+                .spec
+                .signature
+                .public_key
+                .to_certificate()
+                .map_err(|e| Error::Verification(format!("{}", e)))?;
             Some(cert.as_bytes().to_vec())
         }
         RekorEntryBody::HashedRekordV002(rekord) => {
@@ -255,18 +250,20 @@ fn verify_signature_cryptographically(
 ) -> Result<()> {
     // Only verify for MessageSignature (not DSSE envelopes)
     if let SignatureContent::MessageSignature(_) = &bundle.content {
-        // Extract the signature from Rekor (as bytes)
+        // Extract the signature from Rekor
         let signature_bytes = match body {
             RekorEntryBody::HashedRekordV001(rekord) => {
-                rekord.spec.signature.content.as_bytes().to_vec()
+                SignatureBytes::new(rekord.spec.signature.content.as_bytes().to_vec())
             }
-            RekorEntryBody::HashedRekordV002(rekord) => rekord
-                .spec
-                .hashed_rekord_v002
-                .signature
-                .content
-                .as_bytes()
-                .to_vec(),
+            RekorEntryBody::HashedRekordV002(rekord) => SignatureBytes::new(
+                rekord
+                    .spec
+                    .hashed_rekord_v002
+                    .signature
+                    .content
+                    .as_bytes()
+                    .to_vec(),
+            ),
             _ => return Ok(()),
         };
 
@@ -294,23 +291,22 @@ fn verify_signature_cryptographically(
                     && cert_info.signing_scheme.supports_prehashed()
                 {
                     // Extract the SHA-256 hash from the Rekor entry
-                    let hash_bytes = match body {
-                        RekorEntryBody::HashedRekordV001(rekord) => {
-                            Sha256Hash::from_hex(rekord.spec.data.hash.value.as_str())
-                                .map_err(|e| {
-                                    Error::Verification(format!(
-                                        "invalid hash in Rekor entry: {}",
-                                        e
-                                    ))
-                                })?
-                                .as_bytes()
-                                .to_vec()
-                        }
-                        RekorEntryBody::HashedRekordV002(rekord) => {
-                            rekord.spec.hashed_rekord_v002.data.digest.clone()
-                        }
-                        _ => return Ok(()),
-                    };
+                    let hash =
+                        match body {
+                            RekorEntryBody::HashedRekordV001(rekord) => Sha256Hash::from_hex(
+                                rekord.spec.data.hash.value.as_str(),
+                            )
+                            .map_err(|e| {
+                                Error::Verification(format!("invalid hash in Rekor entry: {}", e))
+                            })?,
+                            RekorEntryBody::HashedRekordV002(rekord) => Sha256Hash::try_from_slice(
+                                &rekord.spec.hashed_rekord_v002.data.digest,
+                            )
+                            .map_err(|e| {
+                                Error::Verification(format!("invalid hash in Rekor entry: {}", e))
+                            })?,
+                            _ => return Ok(()),
+                        };
 
                     tracing::debug!(
                         "Using prehashed verification for {} in DIGEST mode",
@@ -318,8 +314,8 @@ fn verify_signature_cryptographically(
                     );
 
                     sigstore_crypto::verification::verify_signature_prehashed(
-                        cert_info.public_key.as_bytes(),
-                        &hash_bytes,
+                        &cert_info.public_key,
+                        &hash,
                         &signature_bytes,
                         cert_info.signing_scheme,
                     )
@@ -341,7 +337,7 @@ fn verify_signature_cryptographically(
             } else {
                 // We have the artifact - verify signature over it
                 sigstore_crypto::verification::verify_signature(
-                    cert_info.public_key.as_bytes(),
+                    &cert_info.public_key,
                     artifact,
                     &signature_bytes,
                     cert_info.signing_scheme,

@@ -8,6 +8,7 @@ use crate::error::{Error, Result};
 use const_oid::db::rfc6962::CT_PRECERT_SCTS;
 use sigstore_crypto::{verify_signature, SigningScheme};
 use sigstore_trust_root::TrustedRoot;
+use sigstore_types::{DerPublicKey, SignatureBytes};
 use tls_codec::{SerializeBytes, TlsByteVecU16, TlsByteVecU24, TlsSerializeBytes, TlsSize};
 use x509_cert::{
     der::{Decode, Encode},
@@ -112,7 +113,12 @@ impl DigitallySigned {
     }
 
     /// Verify this DigitallySigned against a public key from the CT log and SCT signature
-    pub fn verify(&self, public_key: &[u8], sig_alg: u16, signature: &[u8]) -> Result<()> {
+    pub fn verify(
+        &self,
+        public_key: &DerPublicKey,
+        sig_alg: u16,
+        signature: &SignatureBytes,
+    ) -> Result<()> {
         // Serialize the signed data according to RFC 6962
         let signed_data = self
             .tls_serialize()
@@ -227,10 +233,10 @@ pub fn verify_sct(
         Error::Verification(format!("failed to serialize signature algorithm: {}", e))
     })?;
     let sig_alg = u16::from_be_bytes([sig_alg_bytes[0], sig_alg_bytes[1]]);
-    let signature = sct.signature.signature.as_slice();
+    let signature = SignatureBytes::new(sct.signature.signature.clone().into_vec());
 
     // Verify the signature
-    digitally_signed.verify(public_key, sig_alg, signature)?;
+    digitally_signed.verify(public_key, sig_alg, &signature)?;
 
     Ok(())
 }

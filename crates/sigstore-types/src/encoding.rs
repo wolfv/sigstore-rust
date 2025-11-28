@@ -531,6 +531,92 @@ impl std::fmt::Display for KeyId {
 }
 
 // ============================================================================
+// Key Hint Type (Fixed 4-byte Size)
+// ============================================================================
+
+/// Key hint for checkpoint signature identification (4 bytes)
+///
+/// The key hint is the first 4 bytes of SHA-256(public_key_der).
+/// It is used in signed notes/checkpoints to match signatures to public keys.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct KeyHint(#[serde(with = "base64_bytes_array4")] [u8; 4]);
+
+impl KeyHint {
+    /// Create a new key hint from a 4-byte array
+    pub fn new(bytes: [u8; 4]) -> Self {
+        KeyHint(bytes)
+    }
+
+    /// Create from a slice (must be exactly 4 bytes)
+    pub fn try_from_slice(slice: &[u8]) -> crate::error::Result<Self> {
+        if slice.len() != 4 {
+            return Err(crate::error::Error::Validation(format!(
+                "key hint must be exactly 4 bytes, got {}",
+                slice.len()
+            )));
+        }
+        let mut arr = [0u8; 4];
+        arr.copy_from_slice(slice);
+        Ok(KeyHint(arr))
+    }
+
+    /// Get the key hint as a byte slice
+    pub fn as_bytes(&self) -> &[u8; 4] {
+        &self.0
+    }
+
+    /// Get the key hint as a slice
+    pub fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl From<[u8; 4]> for KeyHint {
+    fn from(bytes: [u8; 4]) -> Self {
+        KeyHint::new(bytes)
+    }
+}
+
+impl AsRef<[u8]> for KeyHint {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// Serde helper for base64-encoded 4-byte arrays
+mod base64_bytes_array4 {
+    use base64::{engine::general_purpose::STANDARD, Engine};
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S>(bytes: &[u8; 4], serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<[u8; 4], D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        let bytes = STANDARD
+            .decode(&s)
+            .map_err(|e| serde::de::Error::custom(format!("invalid base64: {}", e)))?;
+        if bytes.len() != 4 {
+            return Err(serde::de::Error::custom(format!(
+                "expected 4 bytes, got {}",
+                bytes.len()
+            )));
+        }
+        let mut arr = [0u8; 4];
+        arr.copy_from_slice(&bytes);
+        Ok(arr)
+    }
+}
+
+// ============================================================================
 // SHA-256 Hash Type (Fixed Size)
 // ============================================================================
 

@@ -66,6 +66,19 @@ pub struct PublicKeyContent {
     pub content: PemContent,
 }
 
+impl PublicKeyContent {
+    /// Parse the PEM content and return a DER certificate
+    pub fn to_certificate(&self) -> Result<DerCertificate, crate::error::Error> {
+        let pem_bytes = self.content.as_bytes();
+        let pem_str = String::from_utf8(pem_bytes.to_vec()).map_err(|e| {
+            crate::error::Error::InvalidResponse(format!("PEM not valid UTF-8: {}", e))
+        })?;
+        DerCertificate::from_pem(&pem_str).map_err(|e| {
+            crate::error::Error::InvalidResponse(format!("failed to parse certificate PEM: {}", e))
+        })
+    }
+}
+
 // ============================================================================
 // HashedRekord v0.0.2
 // ============================================================================
@@ -161,6 +174,19 @@ pub struct DsseV001Signature {
     pub signature: SignatureBytes,
     /// PEM-encoded certificate (base64-encoded)
     pub verifier: PemContent,
+}
+
+impl DsseV001Signature {
+    /// Parse the PEM verifier and return a DER certificate
+    pub fn to_certificate(&self) -> Result<DerCertificate, crate::error::Error> {
+        let pem_bytes = self.verifier.as_bytes();
+        let pem_str = String::from_utf8(pem_bytes.to_vec()).map_err(|e| {
+            crate::error::Error::InvalidResponse(format!("PEM not valid UTF-8: {}", e))
+        })?;
+        DerCertificate::from_pem(&pem_str).map_err(|e| {
+            crate::error::Error::InvalidResponse(format!("failed to parse certificate PEM: {}", e))
+        })
+    }
 }
 
 // ============================================================================

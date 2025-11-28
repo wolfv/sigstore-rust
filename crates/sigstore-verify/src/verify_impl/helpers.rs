@@ -9,20 +9,20 @@ use rustls_pki_types::{CertificateDer, UnixTime};
 use sigstore_crypto::CertificateInfo;
 use sigstore_trust_root::TrustedRoot;
 use sigstore_types::bundle::VerificationMaterialContent;
-use sigstore_types::{Bundle, SignatureContent};
+use sigstore_types::{Bundle, DerCertificate, DerPublicKey, SignatureBytes, SignatureContent};
 use webpki::{anchor_from_trusted_cert, EndEntityCert, KeyUsage, ALL_VERIFICATION_ALGS};
 
 /// Extract and decode the signing certificate from verification material
-pub fn extract_certificate_der(
+pub fn extract_certificate(
     verification_material: &VerificationMaterialContent,
-) -> Result<Vec<u8>> {
+) -> Result<DerCertificate> {
     match verification_material {
-        VerificationMaterialContent::Certificate(cert) => Ok(cert.raw_bytes.as_bytes().to_vec()),
+        VerificationMaterialContent::Certificate(cert) => Ok(cert.raw_bytes.clone()),
         VerificationMaterialContent::X509CertificateChain { certificates } => {
             if certificates.is_empty() {
                 return Err(Error::Verification("no certificates in chain".to_string()));
             }
-            Ok(certificates[0].raw_bytes.as_bytes().to_vec())
+            Ok(certificates[0].raw_bytes.clone())
         }
         VerificationMaterialContent::PublicKey { .. } => Err(Error::Verification(
             "public key verification not yet supported".to_string(),
@@ -30,17 +30,17 @@ pub fn extract_certificate_der(
     }
 }
 
-/// Extract signature bytes from bundle content (needed for TSA verification)
-pub fn extract_signature_bytes(content: &SignatureContent) -> Result<Vec<u8>> {
+/// Extract signature from bundle content (needed for TSA verification)
+pub fn extract_signature(content: &SignatureContent) -> Result<SignatureBytes> {
     match content {
-        SignatureContent::MessageSignature(msg_sig) => Ok(msg_sig.signature.as_bytes().to_vec()),
+        SignatureContent::MessageSignature(msg_sig) => Ok(msg_sig.signature.clone()),
         SignatureContent::DsseEnvelope(envelope) => {
             if envelope.signatures.is_empty() {
                 return Err(Error::Verification(
                     "no signatures in DSSE envelope".to_string(),
                 ));
             }
-            Ok(envelope.signatures[0].sig.as_bytes().to_vec())
+            Ok(envelope.signatures[0].sig.clone())
         }
     }
 }
@@ -166,10 +166,10 @@ pub fn extract_tsa_timestamp(
 /// 3. Current time - fallback
 pub fn determine_validation_time(
     bundle: &Bundle,
-    signature_bytes: &[u8],
+    signature: &SignatureBytes,
     trusted_root: &TrustedRoot,
 ) -> Result<i64> {
-    if let Some(tsa_time) = extract_tsa_timestamp(bundle, signature_bytes, trusted_root)? {
+    if let Some(tsa_time) = extract_tsa_timestamp(bundle, signature.as_bytes(), trusted_root)? {
         Ok(tsa_time)
     } else if let Some(integrated_time) = extract_integrated_time(bundle)? {
         Ok(integrated_time)
@@ -309,13 +309,13 @@ pub fn verify_sct(
     trusted_root: &TrustedRoot,
 ) -> Result<()> {
     // Extract certificate for verification
-    let cert_der = extract_certificate_der(verification_material)?;
+    let cert = extract_certificate(verification_material)?;
 
     // Get issuer SPKI for calculating the issuer key hash
-    let issuer_spki_der = get_issuer_spki(verification_material, &cert_der, trusted_root)?;
+    let issuer_spki = get_issuer_spki(verification_material, &cert, trusted_root)?;
 
     // Delegate to the new sct module for verification
-    super::sct::verify_sct(&cert_der, &issuer_spki_der, trusted_root)
+    super::sct::verify_sct(cert.as_bytes(), issuer_spki.as_bytes(), trusted_root)
 }
 
 /// Get the issuer's SubjectPublicKeyInfo DER bytes
@@ -324,9 +324,9 @@ pub fn verify_sct(
 /// or in the trusted root, and returns its SPKI for SCT verification.
 fn get_issuer_spki(
     verification_material: &VerificationMaterialContent,
-    cert_der: &[u8],
+    cert: &DerCertificate,
     trusted_root: &TrustedRoot,
-) -> Result<Vec<u8>> {
+) -> Result<DerPublicKey> {
     use x509_cert::der::{Decode, Encode};
     use x509_cert::Certificate;
 
@@ -339,18 +339,19 @@ fn get_issuer_spki(
             let issuer_cert = Certificate::from_der(issuer_der).map_err(|e| {
                 Error::Verification(format!("failed to parse issuer certificate: {}", e))
             })?;
-            return issuer_cert
+            let spki_der = issuer_cert
                 .tbs_certificate
                 .subject_public_key_info
                 .to_der()
-                .map_err(|e| Error::Verification(format!("failed to encode issuer SPKI: {}", e)));
+                .map_err(|e| Error::Verification(format!("failed to encode issuer SPKI: {}", e)))?;
+            return Ok(DerPublicKey::new(spki_der));
         }
     }
 
     // 2. Try to find in trusted root
-    let cert = Certificate::from_der(cert_der)
+    let parsed_cert = Certificate::from_der(cert.as_bytes())
         .map_err(|e| Error::Verification(format!("failed to parse certificate: {}", e)))?;
-    let issuer_name = cert.tbs_certificate.issuer;
+    let issuer_name = parsed_cert.tbs_certificate.issuer;
 
     let fulcio_certs = trusted_root
         .fulcio_certs()
@@ -359,13 +360,14 @@ fn get_issuer_spki(
     for ca_der in fulcio_certs {
         if let Ok(ca_cert) = Certificate::from_der(&ca_der) {
             if ca_cert.tbs_certificate.subject == issuer_name {
-                return ca_cert
+                let spki_der = ca_cert
                     .tbs_certificate
                     .subject_public_key_info
                     .to_der()
                     .map_err(|e| {
                         Error::Verification(format!("failed to encode issuer SPKI: {}", e))
-                    });
+                    })?;
+                return Ok(DerPublicKey::new(spki_der));
             }
         }
     }

@@ -4,7 +4,7 @@ use crate::{Error, Result};
 use chrono::{DateTime, Utc};
 use rustls_pki_types::CertificateDer;
 use serde::{Deserialize, Serialize};
-use sigstore_types::{DerCertificate, DerPublicKey, HashAlgorithm, LogId, LogKeyId};
+use sigstore_types::{DerCertificate, DerPublicKey, HashAlgorithm, KeyHint, LogId, LogKeyId};
 use std::collections::HashMap;
 
 /// TSA certificate with optional validity period (start, end)
@@ -209,46 +209,44 @@ impl TrustedRoot {
 
     /// Get all Rekor public keys with their key hints (4-byte identifiers)
     ///
-    /// Returns a vector of (key_hint, public_key_der) tuples where key_hint is
+    /// Returns a vector of (key_hint, public_key) tuples where key_hint is
     /// the first 4 bytes of the keyId from the log_id field.
-    pub fn rekor_keys_with_hints(&self) -> Result<Vec<([u8; 4], Vec<u8>)>> {
+    pub fn rekor_keys_with_hints(&self) -> Result<Vec<(KeyHint, DerPublicKey)>> {
         let mut keys = Vec::new();
         for tlog in &self.tlogs {
-            let key_bytes = tlog.public_key.raw_bytes.as_bytes().to_vec();
-
             // Decode the key_id to get the key hint (first 4 bytes)
             let key_id_bytes = tlog.log_id.key_id.decode()?;
 
             if key_id_bytes.len() >= 4 {
-                let key_hint: [u8; 4] = [
+                let key_hint = KeyHint::new([
                     key_id_bytes[0],
                     key_id_bytes[1],
                     key_id_bytes[2],
                     key_id_bytes[3],
-                ];
-                keys.push((key_hint, key_bytes));
+                ]);
+                keys.push((key_hint, tlog.public_key.raw_bytes.clone()));
             }
         }
         Ok(keys)
     }
 
     /// Get a specific Rekor public key by log ID
-    pub fn rekor_key_for_log(&self, log_id: &LogKeyId) -> Result<Vec<u8>> {
+    pub fn rekor_key_for_log(&self, log_id: &LogKeyId) -> Result<DerPublicKey> {
         for tlog in &self.tlogs {
             if &tlog.log_id.key_id == log_id {
-                return Ok(tlog.public_key.raw_bytes.as_bytes().to_vec());
+                return Ok(tlog.public_key.raw_bytes.clone());
             }
         }
         Err(Error::KeyNotFound(log_id.to_string()))
     }
 
     /// Get all Certificate Transparency log public keys mapped by key ID
-    pub fn ctfe_keys(&self) -> Result<HashMap<LogKeyId, Vec<u8>>> {
+    pub fn ctfe_keys(&self) -> Result<HashMap<LogKeyId, DerPublicKey>> {
         let mut keys = HashMap::new();
         for ctlog in &self.ctlogs {
             keys.insert(
                 ctlog.log_id.key_id.clone(),
-                ctlog.public_key.raw_bytes.as_bytes().to_vec(),
+                ctlog.public_key.raw_bytes.clone(),
             );
         }
         Ok(keys)
@@ -257,13 +255,13 @@ impl TrustedRoot {
     /// Get all Certificate Transparency log public keys with their SHA-256 log IDs
     /// Returns a list of (log_id, public_key) pairs where log_id is the SHA-256 hash
     /// of the public key (used for matching against SCTs)
-    pub fn ctfe_keys_with_ids(&self) -> Result<Vec<(Vec<u8>, Vec<u8>)>> {
+    pub fn ctfe_keys_with_ids(&self) -> Result<Vec<(Vec<u8>, DerPublicKey)>> {
         let mut result = Vec::new();
         for ctlog in &self.ctlogs {
             let key_bytes = ctlog.public_key.raw_bytes.as_bytes();
             // Compute SHA-256 hash of the public key to get the log ID
             let log_id = sigstore_crypto::sha256(key_bytes).as_bytes().to_vec();
-            result.push((log_id, key_bytes.to_vec()));
+            result.push((log_id, ctlog.public_key.raw_bytes.clone()));
         }
         Ok(result)
     }

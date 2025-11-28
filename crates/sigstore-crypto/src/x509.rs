@@ -190,4 +190,3 @@ pub fn extract_fulcio_issuer(cert: &Certificate) -> Result<Option<String>> {
 
     Ok(None)
 }
-

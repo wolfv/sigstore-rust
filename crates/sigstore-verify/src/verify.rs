@@ -207,10 +207,10 @@ impl Verifier {
             .map_err(|e| Error::Verification(format!("bundle validation failed: {}", e)))?;
 
         // Extract certificate for verification
-        let cert_der = crate::verify_impl::helpers::extract_certificate_der(
+        let cert = crate::verify_impl::helpers::extract_certificate(
             &bundle.verification_material.content,
         )?;
-        let cert_info = parse_certificate_info(&cert_der)
+        let cert_info = parse_certificate_info(cert.as_bytes())
             .map_err(|e| Error::Verification(format!("failed to parse certificate: {}", e)))?;
 
         // Store identity and issuer in result
@@ -222,11 +222,10 @@ impl Verifier {
         // validate the certificate chain, so this step comes first.
         // These include TSA timestamps and (in the case of rekor v1 entries)
         // rekor log integrated time.
-        let signature_bytes =
-            crate::verify_impl::helpers::extract_signature_bytes(&bundle.content)?;
+        let signature = crate::verify_impl::helpers::extract_signature(&bundle.content)?;
         let validation_time = crate::verify_impl::helpers::determine_validation_time(
             bundle,
-            &signature_bytes,
+            &signature,
             &self.trusted_root,
         )?;
 
@@ -304,12 +303,10 @@ impl Verifier {
             // Verify at least one signature is cryptographically valid
             let mut any_sig_valid = false;
             for sig in &envelope.signatures {
-                let sig_bytes = sig.sig.as_bytes();
-
                 if sigstore_crypto::verify_signature(
-                    cert_info.public_key.as_bytes(),
+                    &cert_info.public_key,
                     &pae,
-                    sig_bytes,
+                    &sig.sig,
                     cert_info.signing_scheme,
                 )
                 .is_ok()

@@ -76,13 +76,7 @@ fn verify_dsse_v001(
     }
 
     // Extract the signing certificate from the bundle
-    let cert_der = super::helpers::extract_certificate_der(&bundle.verification_material.content)?;
-
-    // Convert DER certificate to PEM format directly without parsing
-    let cert_pem_str = pem::encode_config(
-        &pem::Pem::new("CERTIFICATE", cert_der),
-        pem::EncodeConfig::new().set_line_ending(pem::LineEnding::LF),
-    );
+    let cert = super::helpers::extract_certificate(&bundle.verification_material.content)?;
 
     // Verify that the signatures in the bundle match what's in Rekor
     // This prevents signature substitution attacks
@@ -100,11 +94,14 @@ fn verify_dsse_v001(
     for bundle_sig in &envelope.signatures {
         let mut found = false;
         for rekor_sig in rekor_signatures {
-            // Compare both signature bytes AND the verifier (certificate)
-            // The signature field in the bundle is SignatureBytes, compare as bytes
-            // The verifier field is PemContent - already decoded from base64, contains PEM text bytes
+            // Convert Rekor's PEM verifier to DER for canonical comparison
+            let rekor_cert_der = rekor_sig
+                .to_certificate()
+                .map_err(|e| Error::Verification(format!("{}", e)))?;
+
+            // Compare both signature bytes AND the verifier (certificate as DER)
             if bundle_sig.sig.as_bytes() == rekor_sig.signature.as_bytes()
-                && cert_pem_str.as_bytes() == rekor_sig.verifier.as_bytes()
+                && cert.as_bytes() == rekor_cert_der.as_bytes()
             {
                 found = true;
                 break;
@@ -158,8 +155,8 @@ fn verify_dsse_v002(
         )));
     }
 
-    // Extract the signing certificate from the bundle (DER bytes)
-    let cert_der = super::helpers::extract_certificate_der(&bundle.verification_material.content)?;
+    // Extract the signing certificate from the bundle
+    let cert = super::helpers::extract_certificate(&bundle.verification_material.content)?;
 
     // Verify that the signatures in the bundle match what's in Rekor
     // This prevents signature substitution attacks
@@ -182,7 +179,7 @@ fn verify_dsse_v002(
             // The signature field in the bundle is SignatureBytes, compare as bytes
             // The verifier contains the x509Certificate.rawBytes (DerCertificate)
             if bundle_sig.sig.as_bytes() == rekor_sig.content.as_bytes()
-                && cert_der == rekor_sig.verifier.x509_certificate.raw_bytes.as_bytes()
+                && cert.as_bytes() == rekor_sig.verifier.x509_certificate.raw_bytes.as_bytes()
             {
                 found = true;
                 break;
