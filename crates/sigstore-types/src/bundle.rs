@@ -7,7 +7,7 @@
 use crate::checkpoint::Checkpoint;
 use crate::dsse::DsseEnvelope;
 use crate::encoding::{
-    CanonicalizedBody, DerCertificate, LogIndex, LogKeyId, Sha256Hash, SignatureBytes,
+    string_i64, CanonicalizedBody, DerCertificate, LogIndex, LogKeyId, Sha256Hash, SignatureBytes,
     SignedTimestamp, TimestampToken,
 };
 use crate::error::{Error, Result};
@@ -23,6 +23,11 @@ where
 {
     let opt = Option::deserialize(deserializer)?;
     Ok(opt.unwrap_or_default())
+}
+
+/// Helper for skip_serializing_if to check if i64 is zero
+fn is_zero(value: &i64) -> bool {
+    *value == 0
 }
 
 /// Sigstore bundle media types
@@ -234,8 +239,9 @@ pub struct TransparencyLogEntry {
     /// Kind and version of the entry
     pub kind_version: KindVersion,
     /// Integrated time (Unix timestamp)
-    #[serde(default, skip_serializing_if = "String::is_empty")]
-    pub integrated_time: String,
+    /// For Rekor V2 entries, this field may be omitted (defaults to 0)
+    #[serde(default, with = "string_i64", skip_serializing_if = "is_zero")]
+    pub integrated_time: i64,
     /// Inclusion promise (Signed Entry Timestamp)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub inclusion_promise: Option<InclusionPromise>,
@@ -281,7 +287,8 @@ pub struct InclusionProof {
     /// Root hash of the tree
     pub root_hash: Sha256Hash,
     /// Tree size at time of proof
-    pub tree_size: String,
+    #[serde(with = "string_i64")]
+    pub tree_size: i64,
     /// Hashes in the inclusion proof path
     #[serde(with = "sha256_hash_vec")]
     pub hashes: Vec<Sha256Hash>,
@@ -349,6 +356,11 @@ pub struct Rfc3161Timestamp {
     pub signed_timestamp: TimestampToken,
 }
 
+/// Default media type for bundles that don't specify one (pre-v0.1 format)
+fn default_media_type() -> String {
+    "application/vnd.dev.sigstore.bundle+json;version=0.1".to_string()
+}
+
 // Custom Deserialize implementation for Bundle
 impl<'de> Deserialize<'de> for Bundle {
     fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
@@ -358,6 +370,8 @@ impl<'de> Deserialize<'de> for Bundle {
         #[derive(Deserialize)]
         #[serde(rename_all = "camelCase")]
         struct BundleHelper {
+            // Cosign V1 bundles may not have mediaType - default to v0.1
+            #[serde(default = "default_media_type")]
             media_type: String,
             verification_material: VerificationMaterial,
             #[serde(flatten)]

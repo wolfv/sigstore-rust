@@ -1,29 +1,25 @@
-//! Example: Sign a blob with Sigstore
+//! Example: Sign a conda package attestation with Sigstore
 //!
-//! This example demonstrates how to sign an artifact using Sigstore's keyless signing.
+//! This example demonstrates how to create an in-toto attestation for a conda package
+//! using Sigstore's keyless signing, similar to what GitHub Actions produces.
 //!
 //! # Usage
 //!
-//! Sign a file (interactive OAuth flow):
+//! Sign a conda package (interactive OAuth flow):
 //! ```sh
-//! cargo run -p sigstore-sign --example sign_blob -- artifact.txt -o artifact.sigstore.json
+//! cargo run -p sigstore-sign --example sign_attestation -- \
+//!     package.conda -o package.sigstore.json
 //! ```
 //!
 //! Sign with an identity token (e.g., from GitHub Actions):
 //! ```sh
-//! cargo run -p sigstore-sign --example sign_blob -- \
+//! cargo run -p sigstore-sign --example sign_attestation -- \
 //!     --token "$OIDC_TOKEN" \
-//!     artifact.txt -o artifact.sigstore.json
-//! ```
-//!
-//! Use Rekor V2 API (when available):
-//! ```sh
-//! cargo run -p sigstore-sign --example sign_blob -- --v2 artifact.txt
+//!     package.conda -o package.sigstore.json
 //! ```
 //!
 //! # In GitHub Actions
 //!
-//! The example will automatically detect GitHub Actions and use ambient credentials:
 //! ```yaml
 //! jobs:
 //!   sign:
@@ -32,16 +28,23 @@
 //!       id-token: write  # Required for OIDC token
 //!     steps:
 //!       - uses: actions/checkout@v4
-//!       - name: Sign artifact
-//!         run: cargo run -p sigstore-sign --example sign_blob -- artifact.txt -o artifact.sigstore.json
+//!       - name: Sign package
+//!         run: cargo run -p sigstore-sign --example sign_attestation -- package.conda
+//! ```
+//!
+//! # Example with test data
+//!
+//! ```sh
+//! cargo run -p sigstore-sign --example sign_attestation -- \
+//!     crates/sigstore-verify/test_data/bundles/signed-package-2.1.0-hb0f4dca_0.conda
 //! ```
 
 use sigstore_oidc::{get_ambient_token, get_identity_token, is_ci_environment, IdentityToken};
-use sigstore_rekor::RekorApiVersion;
-use sigstore_sign::{SigningConfig, SigningContext};
+use sigstore_sign::{Attestation, SigningConfig, SigningContext};
 
 use std::env;
 use std::fs;
+use std::path::Path;
 use std::process;
 
 #[tokio::main]
@@ -52,7 +55,7 @@ async fn main() {
     let mut token: Option<String> = None;
     let mut output: Option<String> = None;
     let mut staging = false;
-    let mut use_v2 = false;
+    let mut channel: Option<String> = None;
     let mut positional: Vec<String> = Vec::new();
 
     let mut i = 1;
@@ -74,11 +77,16 @@ async fn main() {
                 }
                 output = Some(args[i].clone());
             }
+            "--channel" | "-c" => {
+                i += 1;
+                if i >= args.len() {
+                    eprintln!("Error: --channel requires a value");
+                    process::exit(1);
+                }
+                channel = Some(args[i].clone());
+            }
             "--staging" => {
                 staging = true;
-            }
-            "--v2" => {
-                use_v2 = true;
             }
             "--help" | "-h" => {
                 print_usage(&args[0]);
@@ -97,25 +105,37 @@ async fn main() {
     }
 
     if positional.len() != 1 {
-        eprintln!("Error: Expected exactly 1 positional argument (artifact path)");
+        eprintln!("Error: Expected exactly 1 positional argument (package path)");
         print_usage(&args[0]);
         process::exit(1);
     }
 
-    let artifact_path = &positional[0];
-    let output_path = output.unwrap_or_else(|| format!("{}.sigstore.json", artifact_path));
+    let package_path = &positional[0];
+    let output_path = output.unwrap_or_else(|| format!("{}.sigstore.json", package_path));
+    let target_channel = channel.unwrap_or_else(|| "https://example.com/my-channel".to_string());
 
-    // Read artifact
-    let artifact = match fs::read(artifact_path) {
+    // Read package
+    let package_bytes = match fs::read(package_path) {
         Ok(data) => data,
         Err(e) => {
-            eprintln!("Error reading artifact '{}': {}", artifact_path, e);
+            eprintln!("Error reading package '{}': {}", package_path, e);
             process::exit(1);
         }
     };
 
-    println!("Signing artifact: {}", artifact_path);
-    println!("  Size: {} bytes", artifact.len());
+    // Get package filename
+    let package_name = Path::new(package_path)
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or(package_path);
+
+    println!("Creating attestation for: {}", package_path);
+    println!("  Package: {}", package_name);
+    println!("  Size: {} bytes", package_bytes.len());
+
+    // Compute package hash
+    let package_hash = sigstore_crypto::sha256(&package_bytes);
+    println!("  SHA256: {}", hex::encode(package_hash.as_bytes()));
 
     // Get identity token
     let identity_token = match get_token(token).await {
@@ -126,15 +146,11 @@ async fn main() {
         }
     };
 
-    // Print token info
     println!("  Identity: {}", identity_token.subject());
-    if let Some(email) = identity_token.email() {
-        println!("  Email: {}", email);
-    }
     println!("  Issuer: {}", identity_token.issuer());
 
-    // Create signing context with appropriate API version
-    let base_config = if staging {
+    // Get signing config
+    let config = if staging {
         println!("  Using: staging infrastructure");
         SigningConfig::staging()
     } else {
@@ -142,49 +158,50 @@ async fn main() {
         SigningConfig::production()
     };
 
-    let config = if use_v2 {
-        base_config.with_rekor_version(RekorApiVersion::V2)
-    } else {
-        base_config
-    };
-
-    println!("  Rekor API: {:?}", config.rekor_api_version);
+    println!("  Fulcio URL: {}", config.fulcio_url);
     println!("  Rekor URL: {}", config.rekor_url);
     if let Some(ref tsa_url) = config.tsa_url {
         println!("  TSA URL: {}", tsa_url);
-    } else {
-        println!("  TSA URL: (none)");
     }
 
-    let context = SigningContext::with_config(config);
+    // Create attestation using the high-level API
+    let predicate = serde_json::json!({
+        "targetChannel": target_channel
+    });
 
-    // Create signer and sign
+    let attestation = Attestation::new(
+        "https://schemas.conda.org/attestations-publish-1.schema.json",
+        predicate,
+    )
+    .add_subject(package_name, package_hash);
+
+    println!("\nIn-Toto Statement:");
+    println!("  Type: https://in-toto.io/Statement/v1");
+    println!("  Predicate Type: https://schemas.conda.org/attestations-publish-1.schema.json");
+    println!(
+        "  Subject: {} (sha256:{}...)",
+        package_name,
+        &hex::encode(package_hash.as_bytes())[..16]
+    );
+
+    // Create signing context and sign
+    let context = SigningContext::with_config(config);
     let signer = context.signer(identity_token);
 
-    println!("\nSigning...");
-    let bundle = match signer.sign(&artifact).await {
+    println!("\nSigning attestation...");
+    let bundle = match signer.sign_attestation(attestation).await {
         Ok(b) => b,
         Err(e) => {
-            eprintln!("Error signing artifact: {}", e);
+            eprintln!("Error signing attestation: {}", e);
             process::exit(1);
         }
     };
 
     // Write bundle
-    let bundle_json = match bundle.to_json_pretty() {
-        Ok(j) => j,
-        Err(e) => {
-            eprintln!("Error serializing bundle: {}", e);
-            process::exit(1);
-        }
-    };
+    let bundle_json = bundle.to_json_pretty().expect("Failed to serialize bundle");
+    fs::write(&output_path, &bundle_json).expect("Failed to write bundle");
 
-    if let Err(e) = fs::write(&output_path, &bundle_json) {
-        eprintln!("Error writing bundle to '{}': {}", output_path, e);
-        process::exit(1);
-    }
-
-    println!("\nSignature created successfully!");
+    println!("\nAttestation created successfully!");
     println!("  Bundle: {}", output_path);
     println!("  Media Type: {}", bundle.media_type);
 
@@ -195,21 +212,14 @@ async fn main() {
             entry.kind_version.kind, entry.kind_version.version
         );
         println!("  Log Index: {}", entry.log_index);
-        // For V2, integrated_time is always 0 - RFC3161 timestamps are used instead
         let ts = entry.integrated_time;
-        if ts == 0 && entry.kind_version.version == "0.0.2" {
-            println!("  Integrated Time: (V2 uses RFC3161 timestamps)");
+        if ts == 0 {
+            println!("  Integrated Time: (uses RFC3161 timestamps)");
         } else {
             use chrono::{DateTime, Utc};
             if let Some(dt) = DateTime::<Utc>::from_timestamp(ts, 0) {
                 println!("  Integrated Time: {}", dt);
             }
-        }
-        // Show if we have inclusion proof (V2) vs just promise (V1)
-        if entry.inclusion_proof.is_some() {
-            println!("  Inclusion Proof: yes (with checkpoint)");
-        } else if entry.inclusion_promise.is_some() {
-            println!("  Inclusion Promise: yes (SET)");
         }
     }
 
@@ -221,24 +231,20 @@ async fn main() {
         .len();
     if ts_count > 0 {
         println!("  RFC3161 Timestamps: {}", ts_count);
-    } else {
-        println!("  RFC3161 Timestamps: none (V2 bundles require timestamps!)");
     }
 
     println!("\nVerify with:");
     println!(
-        "  cargo run -p sigstore-verify --example verify_bundle -- {} {}",
-        artifact_path, output_path
+        "  cargo run -p sigstore-verify --example verify_conda_attestation -- {} {}",
+        package_path, output_path
     );
 }
 
 async fn get_token(explicit_token: Option<String>) -> Result<IdentityToken, String> {
-    // 1. Use explicit token if provided
     if let Some(token_str) = explicit_token {
         return IdentityToken::from_jwt(&token_str).map_err(|e| format!("Invalid token: {}", e));
     }
 
-    // 2. Try ambient credentials (CI/CD environments)
     if is_ci_environment() {
         println!("  Detected CI environment, using ambient credentials");
         return get_ambient_token()
@@ -246,7 +252,6 @@ async fn get_token(explicit_token: Option<String>) -> Result<IdentityToken, Stri
             .map_err(|e| format!("Failed to get ambient token: {}", e));
     }
 
-    // 3. Fall back to interactive OAuth device code flow
     println!("  Starting interactive authentication...");
     println!();
 
@@ -265,37 +270,30 @@ async fn get_token(explicit_token: Option<String>) -> Result<IdentityToken, Stri
 }
 
 fn print_usage(program: &str) {
-    eprintln!("Usage: {} [OPTIONS] <ARTIFACT>", program);
+    eprintln!("Usage: {} [OPTIONS] <PACKAGE>", program);
     eprintln!();
-    eprintln!("Sign an artifact using Sigstore keyless signing.");
+    eprintln!("Create a Sigstore attestation for a conda package.");
     eprintln!();
     eprintln!("Arguments:");
-    eprintln!("  <ARTIFACT>           Path to the artifact file to sign");
+    eprintln!("  <PACKAGE>            Path to the .conda package file");
     eprintln!();
     eprintln!("Options:");
-    eprintln!("  -o, --output <FILE>  Output bundle path (default: <artifact>.sigstore.json)");
+    eprintln!("  -o, --output <FILE>  Output bundle path (default: <package>.sigstore.json)");
     eprintln!("  -t, --token <TOKEN>  OIDC identity token (skips interactive auth)");
+    eprintln!("  -c, --channel <URL>  Target channel URL for the attestation");
     eprintln!("      --staging        Use Sigstore staging infrastructure");
-    eprintln!("      --v2             Use Rekor V2 API (uses log2025-1.rekor.sigstore.dev)");
     eprintln!("  -h, --help           Print this help message");
-    eprintln!();
-    eprintln!("By default, Rekor V1 API is used (rekor.sigstore.dev).");
-    eprintln!("Use --v2 to use the new Rekor V2 API with inclusion proofs and checkpoints.");
     eprintln!();
     eprintln!("Examples:");
     eprintln!("  # Sign interactively (opens browser for OAuth)");
-    eprintln!("  {} artifact.txt", program);
+    eprintln!("  {} package.conda", program);
     eprintln!();
     eprintln!("  # Sign with explicit output path");
-    eprintln!("  {} artifact.txt -o my-bundle.sigstore.json", program);
+    eprintln!(
+        "  {} package.conda -o my-attestation.sigstore.json",
+        program
+    );
     eprintln!();
     eprintln!("  # Sign with a pre-obtained token");
-    eprintln!("  {} --token \"$OIDC_TOKEN\" artifact.txt", program);
-    eprintln!();
-    eprintln!("  # Sign using Rekor V2 API");
-    eprintln!("  {} --v2 artifact.txt", program);
-    eprintln!();
-    eprintln!("In GitHub Actions:");
-    eprintln!("  # Add 'id-token: write' permission, then run without --token");
-    eprintln!("  # The example auto-detects GitHub Actions and uses ambient OIDC");
+    eprintln!("  {} --token \"$OIDC_TOKEN\" package.conda", program);
 }
